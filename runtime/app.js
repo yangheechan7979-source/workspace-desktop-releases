@@ -170,11 +170,25 @@ function openSharedLink(keepTrail = false) {
 }
 let recentSort = "recent";
 let selectedFileId = null;
-function selectFile(id) {
+const selectedFileIds = new Set();
+let fileClipboard = null;
+let draggingFiles = null;
+let transferBusy = false;
+function selectFile(id, event) {
+  if(event?.shiftKey && selectedFileId){
+    const visible=[...document.querySelectorAll('[data-file-select]')].map(node=>node.dataset.fileSelect);
+    const a=visible.indexOf(selectedFileId),b=visible.indexOf(id);
+    if(a>=0&&b>=0){selectedFileIds.clear();visible.slice(Math.min(a,b),Math.max(a,b)+1).forEach(value=>selectedFileIds.add(value));}
+  }else if(event?.ctrlKey || event?.metaKey){if(selectedFileIds.has(id))selectedFileIds.delete(id);else selectedFileIds.add(id);}
+  else {selectedFileIds.clear();if(id)selectedFileIds.add(id);}
   selectedFileId = id;
+  paintFileSelection();
+}
+function paintFileSelection() {
   document.querySelectorAll('[data-file-select]').forEach(element => {
-    const selected = element.dataset.fileSelect === id;
+    const selected = selectedFileIds.has(element.dataset.fileSelect);
     element.classList.toggle('file-selected', selected);
+    element.classList.toggle('file-cut', fileClipboard?.owner===user?.id && fileClipboard.mode==='move' && fileClipboard.ids.includes(element.dataset.fileSelect));
     element.setAttribute('aria-selected', String(selected));
   });
 }
@@ -182,16 +196,96 @@ function bindFileSelection(element, id, trigger = element) {
   element.dataset.fileSelect = id;
   element.tabIndex = 0;
   trigger.removeAttribute('data-action');
-  trigger.onclick = event => { if (event.target.closest('button') && !event.target.closest('.card-open')) return; event.stopPropagation(); selectFile(id); };
+  trigger.onclick = event => { if (event.target.closest('button') && !event.target.closest('.card-open')) return; event.stopPropagation(); element.focus(); selectFile(id,event); };
   trigger.ondblclick = event => { event.preventDefault(); event.stopPropagation(); openFile(id); };
   if(element!==trigger){
-    element.onclick=event=>{if(!event.target.closest('button'))selectFile(id);};
+    element.onclick=event=>{if(!event.target.closest('button')){element.focus();selectFile(id,event);}};
     element.ondblclick=event=>{if(!event.target.closest('button')){event.preventDefault();openFile(id);}};
   }
   element.onkeydown = event => {
     if (event.target !== element && event.target !== trigger) return;
     if (event.key === 'Enter') { event.preventDefault(); openFile(id); }
     if (event.key === ' ') { event.preventDefault(); selectFile(id); }
+  };
+  element.draggable = tab !== 'trash';
+  element.ondragstart = event => {
+    if(!selectedFileIds.has(id))selectFile(id);
+    draggingFiles={owner:user.id,ids:[...selectedFileIds]};
+    event.dataTransfer.setData('application/x-workspace-files',JSON.stringify(draggingFiles));
+    event.dataTransfer.effectAllowed='copyMove';
+  };
+  element.ondragend=()=>{draggingFiles=null;document.querySelectorAll('.file-drop-target').forEach(node=>node.classList.remove('file-drop-target'));};
+  if(files.find(file=>file.id===id)?.type==='folder' && tab!=='trash')bindFolderDrop(element,id);
+}
+function fileDescendants(ids) {
+  const result=new Set(ids);let changed=true;
+  while(changed){changed=false;for(const file of files)if(!file.deleted&&result.has(file.parent)&&!result.has(file.id)){result.add(file.id);changed=true;}}
+  return result;
+}
+function clipboardFiles(mode,id) {
+  if(id&&!selectedFileIds.has(id))selectFile(id);
+  const visible=new Set([...document.querySelectorAll('[data-file-select]')].map(node=>node.dataset.fileSelect));
+  const ids=[...selectedFileIds].filter(value=>visible.has(value)&&files.some(file=>file.id===value&&!file.deleted));
+  if(!ids.length)return;
+  fileClipboard={owner:user.id,mode,ids};paintFileSelection();
+  notice(`${ids.length}개 항목 ${mode==='move'?'잘라내기':'복사'} · 붙여넣을 폴더로 이동해주세요.`);
+}
+async function transferFiles(ids,destination,mode) {
+  if(transferBusy)throw Error('파일을 처리 중입니다. 잠시 기다려주세요.');
+  if(sharedSession)throw Error('내 작업공간에서 파일을 이동해주세요.');
+  if(destination&&!files.some(file=>file.id===destination&&file.type==='folder'&&!file.deleted))throw Error('대상 폴더를 찾을 수 없습니다.');
+  const selected=new Set(ids);
+  const roots=files.filter(file=>selected.has(file.id)&&!file.deleted).filter(file=>{
+    let parent=file.parent;const seen=new Set();
+    while(parent&&!seen.has(parent)){if(selected.has(parent))return false;seen.add(parent);parent=files.find(item=>item.id===parent)?.parent;}return true;
+  });
+  if(!roots.length)throw Error('선택한 파일이 삭제되었거나 없습니다.');
+  const descendants=fileDescendants(roots.map(file=>file.id));
+  if(destination&&descendants.has(destination))throw Error('자기 자신이나 하위 폴더 안에는 넣을 수 없습니다.');
+  const owner=user.id;
+  transferBusy=true;
+  try{
+    const copies=[],moves=[],now=Date.now();
+    if(mode==='move')roots.filter(file=>(file.parent||null)!==(destination||null)).forEach(file=>moves.push({id:file.id,parent:destination||null,modified:now}));
+    else{
+      const sourceFiles=files.filter(file=>descendants.has(file.id)&&!file.deleted);
+      const remap=new Map(sourceFiles.map(file=>[file.id,crypto.randomUUID()]));
+      const rootIds=new Set(roots.map(file=>file.id));
+      const names=new Set(files.filter(file=>!file.deleted&&(file.parent||null)===(destination||null)).map(file=>file.name));
+      for(const original of sourceFiles){
+        const copy=JSON.parse(JSON.stringify(original));
+        copy.id=remap.get(original.id);copy.parent=rootIds.has(original.id)?destination||null:remap.get(original.parent);
+        for(const key of ['shareId','revision','sharedEntries','trashGroup','lastOpened'])delete copy[key];
+        copy.star=false;copy.created=now;copy.modified=now;
+        if(rootIds.has(original.id)){
+          let name=original.name,n=1;while(names.has(name)){const suffix=` (${n===1?'복사본':'복사본 '+n})`;name=original.name.slice(0,200-suffix.length)+suffix;n++;}copy.name=name;names.add(name);
+        }
+        if(copy.type==='pdf'){copy.data=await blobDataUrl(await pdfBlob(original));copy.hasPdfBody=true;}
+        copies.push(copy);
+      }
+    }
+    if(user?.id!==owner)throw Error('계정이 변경되었습니다.');
+    if(user.cloud)await cloud.transferFiles(owner,copies,moves);
+    if(user?.id!==owner)return;
+    const moved=new Map(moves.map(item=>[item.id,item]));
+    const copyIds=new Set(copies.map(item=>item.id));
+    const next=files.filter(item=>!copyIds.has(item.id)).map(item=>moved.has(item.id)?{...item,...moved.get(item.id)}:item).concat(copies);
+    if(!user.cloud)localStorage.setItem('files:'+owner,JSON.stringify(next));
+    if(user?.id!==owner)return;
+    files=next;let cacheFailed=false;if(user.cloud){try{cache();}catch{cacheFailed=true;}}
+    if(mode==='move'&&fileClipboard?.owner===owner)fileClipboard=null;
+    selectedFileIds.clear();(mode==='move'?roots.map(file=>file.id):copies.filter(file=>(file.parent||null)===(destination||null)).map(file=>file.id)).forEach(id=>selectedFileIds.add(id));
+    render();notice(cacheFailed?'클라우드에 저장했지만 이 기기의 캐시 공간이 부족합니다.':mode==='move'?'이동했습니다.':'복사했습니다.');
+  }finally{transferBusy=false;}
+}
+function bindFolderDrop(element,destination) {
+  element.ondragover=event=>{if(!draggingFiles||draggingFiles.owner!==user?.id)return;event.preventDefault();event.stopPropagation();event.dataTransfer.dropEffect=event.ctrlKey||event.altKey?'copy':'move';element.classList.add('file-drop-target');};
+  element.ondragleave=event=>{if(!element.contains(event.relatedTarget))element.classList.remove('file-drop-target');};
+  element.ondrop=async event=>{
+    if(!draggingFiles||draggingFiles.owner!==user?.id)return;
+    event.preventDefault();event.stopPropagation();element.classList.remove('file-drop-target');
+    const ids=draggingFiles.ids;draggingFiles=null;
+    try{await transferFiles(ids,destination,event.ctrlKey||event.altKey?'copy':'move');}catch(error){notice(error.message);}
   };
 }
 function searchFiles() {
@@ -434,7 +528,7 @@ async function enter(u) {
 }
 function cache() {
   const cached = files.map((file) => {
-    if (file.type === "pdf" && file.data?.length > 400000) {
+    if (user.cloud && file.type === "pdf" && file.data?.length > 400000) {
       const copy = { ...file };
       delete copy.data;
       return copy;
@@ -528,6 +622,7 @@ function discardEmptyDraft(type) {
 }
 async function nav(t) {
   flush();
+  selectedFileIds.clear();selectedFileId=null;
   if (opened) openedTabs[tab]=opened;
   if (sharedSession) { parkedShare=sharedSession;sharedSession=null; }
   tab = t;
@@ -713,6 +808,7 @@ function bindContent() {
   if (current()?.type === 'words' && !window.wordTools.active(quizKey(current()))) {
     $('.content .actions')?.insertAdjacentHTML('afterend', `<div class="actions" style="margin-top:18px">${btn('퀴즈','word-quiz','circle-help')}</div>`);
     $('.content')?.insertAdjacentHTML('beforeend', window.wordTools.historyView(quizKey(current())));
+    mountWordPanels();
   }
   if (current() && !sharedSession && $('.feature-actions')) $('.feature-actions').insertAdjacentHTML('afterbegin', btn('공유','share','share-2'));
   if (sharedSession && sharedSession.owner !== user.id) {
@@ -721,7 +817,7 @@ function bindContent() {
   if (sharedSession && sharedSession.owner !== user.id && sharedSession.role !== 'editor') {
     document.querySelectorAll('.content input,.content textarea,.content select').forEach(input => input.disabled = true);
     document.querySelectorAll('.content button').forEach(button => {
-      if (!['word-quiz','word-prev','word-next','reveal','speak','month-prev','month-next','month-today'].includes(button.dataset.action) && !/^(shared-open|shared-copy):/.test(button.dataset.action || '')) button.disabled = true;
+      if (!['word-quiz','word-prev','word-next','reveal','speak','month-prev','month-next','month-today'].includes(button.dataset.action) && !/^(word|shared-open|shared-copy):/.test(button.dataset.action || '')) button.disabled = true;
     });
   }
   if (current()?.type === 'words') {
@@ -746,11 +842,18 @@ function bindContent() {
   document.querySelectorAll('.recent-card').forEach(card => {
     const trigger = card.querySelector('.card-open');
     const id = trigger.dataset.action.slice(5);
-    card.oncontextmenu = event => { event.preventDefault(); selectFile(id); menuFile(id); };
+    card.oncontextmenu = event => { event.preventDefault(); if(!selectedFileIds.has(id))selectFile(id); menuFile(id); };
     card.querySelector('.card-dropdown')?.insertAdjacentHTML('afterbegin', btn('공유','share:' + id,'share-2'));
     bindFileSelection(card, id, trigger);
   });
-  selectFile(selectedFileId);
+  paintFileSelection();
+  const workspaceDrop=$('.sidebar [data-action="tab:workspace"]');if(workspaceDrop)bindFolderDrop(workspaceDrop,null);
+  if(tab==='workspace'&&!sharedSession){
+    bindFolderDrop($('.content'),folder);
+    const rootButton=$('.crumbs [data-action="root"]');if(rootButton)bindFolderDrop(rootButton,null);
+    const upButton=$('.crumbs [data-action="up"]');if(upButton)bindFolderDrop(upButton,files.find(item=>item.id===folder)?.parent||null);
+    $('.crumbs')?.insertAdjacentHTML('beforeend',btn('붙여넣기','file-paste','clipboard-paste'));
+  }
   refreshIcons();
   if ($(".recent-heading")) {
     $(".recent-heading").insertAdjacentHTML("beforeend", `<select id="recent-sort" aria-label="파일 정렬"><option value="recent">최근 열기 순</option><option value="modified">수정일 순</option><option value="name">이름 순</option></select>`);
@@ -836,6 +939,7 @@ async function openFile(id) {
   const f = files.find((f) => f.id === id);
   if (!f || f.deleted) return;
   if (f.type === "folder") {
+    selectedFileIds.clear();selectedFileId=null;
     folder = f.id;
     render();
     return;
@@ -852,9 +956,11 @@ async function openFile(id) {
 function menuFile(id) {
   const f = files.find((f) => f.id === id);
   if (!f) return;
+  if(!selectedFileIds.has(id))selectFile(id);
   modal.innerHTML = `<h2>${esc(f.name)}</h2><div class="list">${f.deleted ? btn("복원", "restore:" + id, "undo-2") + btn("영구 삭제", "destroy:" + id, "trash-2", "danger") : btn("열기", "open:" + id, "folder-open") + btn("이름 변경", "rename:" + id, "pencil") + btn(f.star ? "즐겨찾기 해제" : "즐겨찾기", "star:" + id, "star") + btn("이동", "move:" + id, "folder-input") + btn("휴지통으로 이동", "delete:" + id, "trash-2")}</div>${btn("닫기", "close")}`;
   modal.showModal();
   if (!f.deleted) modal.querySelector('.list').insertAdjacentHTML('afterbegin', btn('공유', 'share:' + id, 'share-2'));
+  if(!f.deleted)modal.querySelector('.list').insertAdjacentHTML('afterbegin',btn('복사','copy:'+id,'copy')+btn('잘라내기','file-cut:'+id,'scissors')+(f.type==='folder'?btn('폴더에 붙여넣기','file-paste:'+id,'clipboard-paste'):''));
   refreshIcons();
 }
 function moveDialog(id) {
@@ -998,6 +1104,39 @@ setInterval(() => {
   if ($("#time")) $("#time").textContent = timeText();
   updateMiniClock();
 }, 250);
+const wordListPositions = new Map();
+function mountWordPanels() {
+  const content = $('.content');
+  $('.main').classList.add('words-panel-layout');
+  const tools = document.createElement('section');
+  tools.className = 'words-tools-panel';
+  tools.setAttribute('aria-label', '단어장 도구');
+  [...content.children].filter(node => node.matches('#quick-form,.actions')).forEach(node => tools.append(node));
+  content.prepend(tools);
+  const split = content.querySelector('.split');
+  if (!split) return;
+  split.classList.add('words-panels');
+  const list = split.querySelector('.list');
+  list.removeAttribute('style');
+  list.setAttribute('aria-label', '단어 목록');
+  const sidebar = document.createElement('section');
+  sidebar.className = 'words-list-panel';
+  sidebar.innerHTML = '<h2>단어 목록</h2>';
+  list.before(sidebar);
+  sidebar.append(list);
+  const flash = split.querySelector('.flash');
+  flash.setAttribute('aria-label', '단어 학습');
+  [...content.children].filter(node => node !== tools && node !== split).forEach(node => flash.append(node));
+  const key = quizKey(current());
+  const previous = wordListPositions.get(key);
+  list.scrollTop = previous?.top || 0;
+  if (!previous || previous.index !== wordIndex) {
+    const selected = list.querySelector('.primary');
+    if (selected) list.scrollTop = Math.max(0, selected.offsetTop - list.offsetTop - list.clientHeight / 2 + selected.clientHeight / 2);
+  }
+  wordListPositions.set(key, {top:list.scrollTop,index:wordIndex});
+  list.addEventListener('scroll', () => wordListPositions.set(key, {top:list.scrollTop,index:wordIndex}));
+}
 function quizKey(f) {
   return JSON.stringify([user.id, sharedSession?.owner || user.id, f.id]);
 }
@@ -1284,33 +1423,21 @@ document.addEventListener("click", async (e) => {
         render();
         break;
       case "copy": {
-        const source = files.find((x) => x.id === id);
-        if (!source) break;
-        const duplicate = JSON.parse(JSON.stringify(source));
-        delete duplicate.shareId;
-        delete duplicate.revision;
-        duplicate.id = crypto.randomUUID();
-        duplicate.name = `${source.name} 복사본`;
-        duplicate.created = Date.now();
-        duplicate.modified = Date.now();
-        duplicate.lastOpened = null;
-        duplicate.star = false;
-        if (duplicate.type === "pdf" && user.cloud) {
-          duplicate.data = await blobDataUrl(await pdfBlob(source));
-          duplicate.hasPdfBody = true;
-          pdfBlobs.set(duplicate.id, pdfBlobs.get(source.id));
-        }
-        await persist(duplicate);
-        cardMenu = null;
-        render();
-        notice("복사본을 만들었습니다.");
+        clipboardFiles('copy',id);
         break;
       }
+      case 'file-cut':
+        clipboardFiles('move',id);break;
+      case 'file-paste':
+        if(fileClipboard?.owner!==user.id){notice('복사하거나 잘라낸 파일이 없습니다.');break;}
+        await transferFiles(fileClipboard.ids,id||folder,fileClipboard.mode);break;
       case "root":
+        selectFile(null);
         folder = null;
         render();
         break;
       case "up":
+        selectFile(null);
         folder = files.find((x) => x.id === folder)?.parent || null;
         render();
         break;
@@ -1431,6 +1558,7 @@ document.addEventListener("click", async (e) => {
         );
         break;
       case "logout":
+        fileClipboard=null;draggingFiles=null;selectedFileIds.clear();selectedFileId=null;
         stopShared?.();sharedSession=null;
         flush();
         timer.running = false;
@@ -1688,6 +1816,20 @@ window.prepareWorkspaceUpdate = async () => {
   shareDirty = false;
 };
 document.addEventListener("keydown", e => {
+  const editing=e.target.closest?.('input,textarea,select,[contenteditable="true"],[role="textbox"]');
+  const fileScreen=tab!=='trash'&&!sharedSession&&(document.querySelector('[data-file-select]') || (tab==='workspace'&&!opened));
+  if(user&&!modal.open&&!editing&&fileScreen&&!e.isComposing&&!e.repeat){
+    const mac=/Mac|iPhone|iPad/.test(navigator.platform), modifier=mac?e.metaKey:e.ctrlKey,key=e.key.toLowerCase();
+    if(modifier&&['c','x','v','a'].includes(key)){
+      e.preventDefault();
+      if(key==='c'||key==='x')clipboardFiles(key==='c'?'copy':'move');
+      if(key==='a'){document.querySelectorAll('[data-file-select]').forEach(node=>selectedFileIds.add(node.dataset.fileSelect));paintFileSelection();}
+      if(key==='v'&&fileClipboard?.owner===user.id)transferFiles(fileClipboard.ids,folder,fileClipboard.mode).catch(error=>notice(error.message));
+      return;
+    }
+    if(e.key==='Escape'){fileClipboard=null;selectFile(null);}
+    if((e.key==='F2'&&!mac)&&selectedFileIds.size===1){e.preventDefault();const node=document.createElement('button');node.dataset.action='rename:'+ [...selectedFileIds][0];document.body.append(node);node.click();node.remove();return;}
+  }
   if (user && !modal.open && (e.ctrlKey || e.metaKey) && e.key.toLowerCase() === "k") {
     e.preventDefault();
     searchFiles();
