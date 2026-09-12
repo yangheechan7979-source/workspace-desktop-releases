@@ -318,9 +318,16 @@ body.dark .note-editing .editor { background: #292d32; border-color: #494e55; bo
 .word-quiz .quiz-option input { width:18px; height:18px; margin:0; }
 .quiz-prompt, .quiz-feedback { overflow-wrap:anywhere; }
 .quiz-error { color:#ef5350; }
+.session-check { text-align:center; }
+.session-check .mark { margin:0 auto; }
+.session-spinner { display:inline-block; width:24px; height:24px; border:2px solid var(--line); border-top-color:var(--ink); border-radius:50%; animation:spin 1s linear infinite; }
+@media(prefers-reduced-motion:reduce) { .session-spinner { animation:none; } }
 dialog.install-guide { width:560px; max-height:85vh; overflow-y:auto; }
 .install-guide p, .install-guide li { line-height:1.65; overflow-wrap:anywhere; }
 .install-guide li { margin:8px 0; }
+.download-platforms { display:grid; gap:12px; margin:20px 0; }
+.download-platforms button { justify-content:flex-start; padding:18px; text-align:left; }
+.download-platforms small { display:block; color:var(--muted); margin-top:6px; }
 .top [data-action="favorite"][aria-pressed="true"] svg { fill: currentColor; }
 .content .toolbar [data-action="favorite"] { display: none; }
 .rich-surface table { width: 100%; table-layout: fixed; border-collapse: collapse; margin: 16px 0; }

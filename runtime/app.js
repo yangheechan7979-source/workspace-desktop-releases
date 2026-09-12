@@ -1300,18 +1300,30 @@ document.addEventListener("click", async (e) => {
         const response = await fetch('desktop-download.json', {cache:'no-store'});
         if (!response.ok) { notice('설치 파일 정보를 불러오지 못했습니다.'); break; }
         const config = await response.json();
-        if (!config.windowsUrl) {
+        if (!config.windowsUrl && !config.macUrl) {
           modal.close();
           showModal('데스크톱 앱 설치', '<p>Windows 설치 파일 준비 중입니다.</p><p>아직 다운로드가 제공되지 않습니다.</p>', () => {});
           break;
         }
-        const url = new URL(config.windowsUrl);
-        if (url.protocol !== 'https:') throw new Error('올바른 설치 파일 주소가 아닙니다.');
         modal.close();
-        showModal('Windows 앱 설치 안내', `<p>Workspace 공식 배포 저장소에서 설치 파일을 다운로드합니다.</p><p>현재 설치 파일에는 코드 서명이 없어 Windows에서 <strong>‘Windows의 PC 보호’</strong> 경고가 표시될 수 있습니다. 이 경고만으로 악성 파일이라는 뜻은 아니지만, 안전성을 보증하는 것도 아닙니다.</p><ol><li><strong>Workspace-Setup.exe</strong>를 실행합니다.</li><li>경고가 뜨면 <strong>추가 정보</strong>를 누릅니다.</li><li>공식 배포처에서 받은 파일이 맞는지 확인한 뒤 <strong>실행</strong>을 누릅니다.</li></ol><p>출처가 다르거나 백신이 구체적인 위협을 탐지하면 실행하지 마세요. Windows 보안 기능을 끌 필요는 없습니다.</p><p class="muted">배포처: github.com/yangheechan7979-source/workspace-desktop-releases</p>`, () => {
-          const link = document.createElement('a');
-          link.href=url.href; link.target='_blank'; link.rel='noopener noreferrer';
-          document.body.append(link); link.click(); link.remove();
+        showModal('데스크톱 앱 설치 안내', `<p>Workspace 공식 배포 파일입니다. 코드 서명 및 Apple 공증이 없어 첫 실행 시 보안 경고가 표시될 수 있습니다.</p><p><strong>Windows</strong><br>공식 파일인지 확인한 뒤 ‘추가 정보 → 실행’을 누르세요.</p><p><strong>Mac</strong><br>DMG를 열고 Workspace를 Applications 폴더로 옮기세요. 실행이 차단되면 시스템 설정 → 개인정보 보호 및 보안에서 해당 앱의 ‘확인 없이 열기’를 선택하세요.</p><p>출처가 다르거나 악성코드로 탐지된 경우 실행하지 마세요. 보안 기능 전체를 끌 필요는 없습니다.</p>`, () => {
+          setTimeout(() => {
+            showModal('운영체제 선택', `<div class="download-platforms"><button type="button" id="download-windows" ${config.windowsUrl ? '' : 'disabled'}>${icon('monitor')}<span>Windows용 다운로드<small>Windows 10 · 11 / 64비트</small></span></button><button type="button" id="download-mac" ${config.macUrl ? '' : 'disabled'}>${icon('laptop')}<span>Mac용 다운로드<small>Apple Silicon · Intel / macOS 12 이상</small></span></button></div>`, () => {});
+            modal.classList.add('install-guide');
+            modal.querySelector('[type="submit"]').remove();
+            for (const [id, address] of [['download-windows', config.windowsUrl], ['download-mac', config.macUrl]]) {
+              document.getElementById(id).onclick = () => {
+                try {
+                  const url = new URL(address);
+                  if (url.protocol !== 'https:') throw new Error('올바른 설치 파일 주소가 아닙니다.');
+                  const link = document.createElement('a');
+                  link.href=url.href; link.target='_blank'; link.rel='noopener noreferrer';
+                  document.body.append(link); link.click(); link.remove();
+                  modal.close();
+                } catch(error) { notice(error.message); }
+              };
+            }
+          }, 0);
         });
         modal.classList.add('install-guide');
         modal.querySelector('[type="submit"]').textContent = '확인하고 다운로드';
@@ -1593,8 +1605,36 @@ try {
 } catch (e) {
   notice("Firebase 설정을 확인해주세요.");
 }
-authScreen();
-if (cloudConfigured) cloud.ready?.(account => {
-  if (account && user?.id !== account.uid) enter({id:account.uid,email:account.email || 'Google 계정',cloud:true});
-  else if (!account && user?.cloud) { cloud.unwatch();stopShared?.();sharedSession=null;authScreen(); }
-});
+if (cloudConfigured && cloud.ready) {
+  $('#app').innerHTML = '<div class="auth"><div class="session-check" role="status" aria-live="polite"><div class="mark">W</div><h1>Workspace</h1><span class="session-spinner" aria-hidden="true"></span><p>세션 확인 중</p></div></div>';
+  let firstAuthState = true;
+  let clearingSession = false;
+  const checkTimer = setTimeout(() => {
+    if (firstAuthState) $('#app').innerHTML = '<div class="auth"><div class="session-check" role="status"><h1>Workspace</h1><p>세션 확인이 지연되고 있습니다.</p><button type="button" id="retry-session">다시 확인</button></div></div>';
+    $('#retry-session')?.addEventListener('click', () => location.reload());
+  }, 15000);
+  cloud.ready(async account => {
+    clearTimeout(checkTimer);
+    if (clearingSession) return;
+    if (firstAuthState) {
+      firstAuthState = false;
+      if (localStorage.getItem('remember-login') !== 'true' && account) {
+        clearingSession = true;
+        try { await cloud.logout(); }
+        catch { /* Automatic entry remains disabled if clearing a saved session fails. */ }
+        finally { clearingSession = false; authScreen(); }
+        return;
+      }
+    }
+    if (account && user?.id !== account.uid) await enter({id:account.uid,email:account.email || 'Google 계정',cloud:true});
+    else if (!account) {
+      if (user?.cloud) { cloud.unwatch();stopShared?.();sharedSession=null; }
+      authScreen();
+    }
+  }, error => {
+    clearTimeout(checkTimer);
+    firstAuthState = false;
+    authScreen();
+    $('#autherror').textContent = errorMessage(error);
+  });
+} else authScreen();
