@@ -10,5 +10,5 @@ const {execFileSync}=require('child_process');
  execFileSync('codesign',['--force','--deep','--sign','-',bundle],{stdio:'inherit'});
  execFileSync('codesign',['--verify','--deep','--strict',bundle],{stdio:'inherit'});
  const {build,Platform,Arch}=require('electron-builder');
- await build({prepackaged:app,targets:Platform.MAC.createTarget(['dmg','zip'],Arch.universal),publish:'never',config:{appId:'com.workspace.desktop',productName:'Workspace',directories:{app:'runtime',output:'dist'},mac:{identity:null,artifactName:'Workspace-Mac.${ext}'},dmg:{sign:false}}});
+ await build({prepackaged:bundle,targets:Platform.MAC.createTarget(['dmg','zip'],Arch.universal),publish:'never',config:{appId:'com.workspace.desktop',productName:'Workspace',directories:{app:'runtime',output:'dist'},mac:{identity:null,icon:path.resolve('Workspace.icns'),artifactName:'Workspace-Mac.${ext}'},dmg:{sign:false}}});
 })();
