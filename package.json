@@ -1,0 +1,1 @@
+{"name":"workspace-mac-release","version":"1.0.1","private":true,"devDependencies":{"electron":"38.8.6","electron-builder":"26.15.3","@electron/packager":"20.3.0","@playwright/test":"1.63.0"}}
