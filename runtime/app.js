@@ -123,23 +123,26 @@ function closeDocument(destination = tab) {
 let stopShared = null;
 let shareDirty = false;
 let shareSaving = false;
-async function sharingDialog() {
-  const file = current();
+let sharingTarget = null;
+async function sharingDialog(targetId) {
+  const file = targetId ? files.find(item => item.id === targetId && !item.deleted) : current();
   if (!file || !user.cloud) return notice('로그인 후 저장한 파일을 공유할 수 있습니다.');
-  if (sharedSession && sharedSession.owner !== user.id) return notice('소유자만 공유 권한을 변경할 수 있습니다.');
+  if (!targetId && sharedSession && sharedSession.owner !== user.id) return notice('소유자만 공유 권한을 변경할 수 있습니다.');
+  sharingTarget = file;
   flush();
   if (!file.shareId) await cloud.save(user.id, file);
   const info = file.shareId ? await cloud.shareInfo(file.shareId) : null;
-  showModal('링크 공유', `<p>${esc(file.name)}</p><label>링크가 있는 로그인 사용자</label><select name="role"><option value="viewer">뷰어 · 읽기 전용</option><option value="editor">편집자 · 내용 수정 가능</option></select><input id="share-link" aria-label="공유 링크" readonly value="${file.shareId && info ? 'https://workspace-app-jeh.pages.dev/#share=' + file.shareId : ''}" placeholder="확인을 누르면 링크가 생성됩니다.">${btn('링크 복사','share-copy','copy')}${info ? btn('공유 해제','share-revoke','link-2-off') : ''}`, async data => {
-    const shareId = await cloud.share(user.id, file, data.get('role'));
-    history.replaceState(null, '', '#share=' + shareId);
-    openSharedLink();
+  showModal('링크 공유', `<p>${esc(file.name)}</p>${file.type === 'folder' ? '<p>현재 내부 폴더와 파일에 같은 공유 권한이 적용됩니다. 기존 개별 링크의 권한도 변경됩니다. 파일을 추가·이동한 뒤에는 여기서 확인을 눌러 목록을 갱신해주세요. 공유 해제는 현재 내부 항목의 개별 링크도 해제합니다.</p>' : ''}<label>링크가 있는 로그인 사용자</label><select name="role"><option value="viewer">뷰어 · 읽기 전용</option><option value="editor">편집자 · 내용 수정 가능</option></select><input id="share-link" aria-label="공유 링크" readonly value="${file.shareId && info ? 'https://workspace-app-jeh.pages.dev/#share=' + file.shareId : ''}" placeholder="확인을 누르면 링크가 생성됩니다.">${btn('링크 복사','share-copy','copy')}${info ? btn('공유 해제','share-revoke','link-2-off') : ''}`, async data => {
+    await (file.type === 'folder' ? cloud.shareFolder(user.id, file, data.get('role')) : cloud.share(user.id, file, data.get('role')));
+    cache();
     notice('공유 링크를 생성했습니다. 링크 복사를 눌러주세요.');
-    setTimeout(sharingDialog, 0);
+    setTimeout(() => sharingDialog(targetId), 0);
   });
   modal.querySelector('select').value = info?.role || 'viewer';
 }
-function openSharedLink() {
+let sharedFolderTrail = [];
+function openSharedLink(keepTrail = false) {
+  if (!keepTrail) sharedFolderTrail = [];
   const id = new URLSearchParams(location.hash.slice(1)).get('share');
   if (!id || !user) return;
   stopShared?.();
@@ -154,7 +157,7 @@ function openSharedLink() {
     const canEdit = info.owner === user.id || info.role === 'editor';
     if (sharedSession?.file.id === file.id && shareDirty && canEdit) { sharedSession.role = info.role; return; }
     sharedSession = {...info, file:normalizeFile(file), id};
-    tab = file.type;
+    tab = file.type === 'folder' ? 'workspace' : file.type;
     opened = file.id;
     sync = canEdit ? '공유 파일 · 편집 가능' : '공유 파일 · 읽기 전용';
     render();
@@ -504,7 +507,7 @@ async function nav(t) {
   if (sharedSession) { parkedShare=sharedSession;sharedSession=null; }
   tab = t;
   opened = openedTabs[t] || null;
-  if (parkedShare?.file.type === t && parkedShare.file.id === opened) { sharedSession=parkedShare;parkedShare=null; }
+  if ((parkedShare?.file.type === 'folder' ? 'workspace' : parkedShare?.file.type) === t && parkedShare.file.id === opened) { sharedSession=parkedShare;parkedShare=null; }
   folder = null;
   query = "";
   wordIndex = 0;
@@ -524,9 +527,10 @@ function render() {
 function headerActions() {
   const file = current();
   const enabled = file && !file.deleted && (!sharedSession || sharedSession.owner === user.id);
-  return `<button type="button" class="icon-action ${file?.star ? 'yellow' : ''}" data-action="favorite" title="즐겨찾기" aria-label="즐겨찾기" aria-pressed="${Boolean(file?.star)}" ${enabled ? '' : 'disabled'}>${icon('star')}</button>` + headerControls();
+  return (sharedSession && sharedFolderTrail.length ? btn('공유 폴더로','shared-parent','folder-up') : '') + `<button type="button" class="icon-action ${file?.star ? 'yellow' : ''}" data-action="favorite" title="즐겨찾기" aria-label="즐겨찾기" aria-pressed="${Boolean(file?.star)}" ${enabled ? '' : 'disabled'}>${icon('star')}</button>` + headerControls();
 }
 function headerControls() {
+  if (sharedSession?.file.type === 'folder' && sharedSession.file.id === opened) return btn('내 작업공간','shared-exit','folder') + (sharedSession.owner === user.id ? btn('공유','share','share-2') : '');
   const searchButton = btn("", "search-files", "search", "icon-action");
   if (["clock", "study"].includes(tab))
     return btn("전체 화면", "fullscreen", "maximize");
@@ -566,6 +570,10 @@ function featureItems() {
   return files.filter(x => x.type === tab && !x.deleted).sort((a, b) => a.modified - b.modified);
 }
 function content() {
+  if (sharedSession?.file.type === 'folder' && sharedSession.file.id === opened) {
+    const entries = sharedSession.file.sharedEntries || [];
+    return `<h2>${esc(sharedSession.file.name)}</h2><div class="list">${entries.length ? entries.map(item => `<div class="shared-folder-row">${btn(esc(item.name), 'shared-open:' + item.shareId, item.type === 'folder' ? 'folder' : icons[item.type] || 'file')}${btn('공유 링크 복사','shared-copy:' + item.shareId,'link')}</div>`).join('') : '<p>공유된 내부 파일이 없습니다.</p>'}</div>`;
+  }
   if (tab === "clock" || tab === "study") return timerView();
   if (tab === "settings") return settingsView();
   if (featureTypes.includes(tab) || tab === "pdf") return featureView();
@@ -672,7 +680,7 @@ function bindContent() {
   if (sharedSession && sharedSession.owner !== user.id && sharedSession.role !== 'editor') {
     document.querySelectorAll('.content input,.content textarea,.content select').forEach(input => input.disabled = true);
     document.querySelectorAll('.content button').forEach(button => {
-      if (!['word-quiz','word-prev','word-next','reveal','speak','month-prev','month-next','month-today'].includes(button.dataset.action)) button.disabled = true;
+      if (!['word-quiz','word-prev','word-next','reveal','speak','month-prev','month-next','month-today'].includes(button.dataset.action) && !/^(shared-open|shared-copy):/.test(button.dataset.action || '')) button.disabled = true;
     });
   }
   if (current()?.type === 'words') {
@@ -683,6 +691,7 @@ function bindContent() {
     const id = row.dataset.openDouble || row.dataset.action?.slice(5);
     const file = files.find(item => item.id === id);
     if (!file) return;
+    row.closest('tr').oncontextmenu = event => { event.preventDefault(); menuFile(id); };
     const type = Object.hasOwn(icons, file.type) ? file.type : 'note';
     const symbol = type === 'note' ? 'file' : icons[type];
     const badge = document.createElement('span');
@@ -691,6 +700,10 @@ function bindContent() {
     badge.setAttribute('aria-label', badge.title);
     badge.innerHTML = icon(symbol);
     row.firstElementChild.replaceWith(badge);
+  });
+  document.querySelectorAll('.recent-card').forEach(card => {
+    card.oncontextmenu = event => { event.preventDefault(); menuFile(card.querySelector('.card-open').dataset.action.slice(5)); };
+    card.querySelector('.card-dropdown')?.insertAdjacentHTML('afterbegin', btn('공유','share:' + card.querySelector('.card-open').dataset.action.slice(5),'share-2'));
   });
   refreshIcons();
   if ($(".recent-heading")) {
@@ -779,12 +792,12 @@ async function openFile(id) {
   flush();
   const f = files.find((f) => f.id === id);
   if (!f || f.deleted) return;
-  if (f.shareId && await cloud.shareInfo(f.shareId)) { history.replaceState(null,'','#share=' + f.shareId);openSharedLink();return; }
   if (f.type === "folder") {
     folder = f.id;
     render();
     return;
   }
+  if (f.shareId && await cloud.shareInfo(f.shareId)) { history.replaceState(null,'','#share=' + f.shareId);openSharedLink();return; }
   opened = id;
   tab = f.type;
   wordIndex = 0;
@@ -795,8 +808,10 @@ async function openFile(id) {
 }
 function menuFile(id) {
   const f = files.find((f) => f.id === id);
+  if (!f) return;
   modal.innerHTML = `<h2>${esc(f.name)}</h2><div class="list">${f.deleted ? btn("복원", "restore:" + id, "undo-2") + btn("영구 삭제", "destroy:" + id, "trash-2", "danger") : btn("열기", "open:" + id, "folder-open") + btn("이름 변경", "rename:" + id, "pencil") + btn(f.star ? "즐겨찾기 해제" : "즐겨찾기", "star:" + id, "star") + btn("이동", "move:" + id, "folder-input") + btn("휴지통으로 이동", "delete:" + id, "trash-2")}</div>${btn("닫기", "close")}`;
   modal.showModal();
+  if (!f.deleted) modal.querySelector('.list').insertAdjacentHTML('afterbegin', btn('공유', 'share:' + id, 'share-2'));
   refreshIcons();
 }
 function moveDialog(id) {
@@ -1058,11 +1073,35 @@ document.addEventListener("click", async (e) => {
     const f = current();
     switch (a) {
       case 'share':
-        await sharingDialog();
+        await sharingDialog(id || undefined);
         break;
       case 'share-revoke':
-        await cloud.revoke(current().shareId);
+        if (!sharingTarget) break;
+        if (sharingTarget.type === 'folder') await cloud.revokeFolder(user.id, sharingTarget.id);
+        else await cloud.revoke(sharingTarget.shareId);
         notice('공유를 해제했습니다.');
+        break;
+      case 'shared-copy':
+        await navigator.clipboard.writeText('https://workspace-app-jeh.pages.dev/#share=' + id);
+        notice('공유 링크를 복사했습니다.');
+        break;
+      case 'shared-open':
+        if (sharedSession?.file.type === 'folder') sharedFolderTrail.push(sharedSession.id);
+        history.pushState(null, '', '#share=' + encodeURIComponent(id));
+        openSharedLink(true);
+        break;
+      case 'shared-parent': {
+        flush();
+        if (shareDirty || shareSaving) { notice('수정 내용을 저장한 뒤 공유 폴더로 돌아가주세요.'); break; }
+        const parentLink = sharedFolderTrail.pop();
+        if (parentLink) { history.pushState(null, '', '#share=' + encodeURIComponent(parentLink)); openSharedLink(true); }
+        break;
+      }
+      case 'shared-exit':
+        stopShared?.(); sharedSession = null; parkedShare = null; opened = null;
+        delete openedTabs.workspace;
+        history.replaceState(null, '', location.pathname + location.search);
+        await nav('workspace');
         break;
       case "search-files":
         searchFiles();

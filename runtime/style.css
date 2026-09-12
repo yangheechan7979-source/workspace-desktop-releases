@@ -557,3 +557,6 @@ dialog .actions {
 .quiz-history details { border-bottom: 1px solid var(--line, #58616b); padding: 16px 0; }
 .quiz-history summary { cursor: pointer; overflow-wrap: anywhere; }
 .quiz-history-answer { display: grid; gap: 8px; padding: 16px 0; overflow-wrap: anywhere; }
+.shared-folder-row { display: flex; flex-wrap: wrap; gap: 8px; margin-bottom: 8px; }
+.shared-folder-row > button:first-child { flex: 1 1 200px; min-width: 0; overflow-wrap: anywhere; }
+.shared-folder-row > button:last-child { width: auto; }
