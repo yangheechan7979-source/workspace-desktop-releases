@@ -173,6 +173,12 @@ let selectedFileId = null;
 const selectedFileIds = new Set();
 let fileClipboard = null;
 let draggingFiles = null;
+let fileRenderPending = false;
+function finishFileDrag() {
+  draggingFiles = null;
+  document.querySelectorAll('.file-drop-target').forEach(node => node.classList.remove('file-drop-target'));
+  if (fileRenderPending && !transferBusy) render();
+}
 let transferBusy = false;
 function selectFile(id, event) {
   if(event?.shiftKey && selectedFileId){
@@ -214,7 +220,7 @@ function bindFileSelection(element, id, trigger = element) {
     event.dataTransfer.setData('application/x-workspace-files',JSON.stringify(draggingFiles));
     event.dataTransfer.effectAllowed='copyMove';
   };
-  element.ondragend=()=>{draggingFiles=null;document.querySelectorAll('.file-drop-target').forEach(node=>node.classList.remove('file-drop-target'));};
+  element.ondragend=finishFileDrag;
   if(files.find(file=>file.id===id)?.type==='folder' && tab!=='trash')bindFolderDrop(element,id);
 }
 function fileDescendants(ids) {
@@ -276,7 +282,7 @@ async function transferFiles(ids,destination,mode) {
     if(mode==='move'&&fileClipboard?.owner===owner)fileClipboard=null;
     selectedFileIds.clear();(mode==='move'?roots.map(file=>file.id):copies.filter(file=>(file.parent||null)===(destination||null)).map(file=>file.id)).forEach(id=>selectedFileIds.add(id));
     render();notice(cacheFailed?'클라우드에 저장했지만 이 기기의 캐시 공간이 부족합니다.':mode==='move'?'이동했습니다.':'복사했습니다.');
-  }finally{transferBusy=false;}
+  }finally{transferBusy=false;if(fileRenderPending)render();}
 }
 function bindFolderDrop(element,destination) {
   element.ondragover=event=>{if(!draggingFiles||draggingFiles.owner!==user?.id)return;event.preventDefault();event.stopPropagation();event.dataTransfer.dropEffect=event.ctrlKey||event.altKey?'copy':'move';element.classList.add('file-drop-target');};
@@ -635,6 +641,9 @@ async function nav(t) {
   render();
 }
 function render() {
+  // Replacing the drag source during a live cloud update cancels native dragging.
+  if (user && (draggingFiles || transferBusy)) { fileRenderPending = true; return; }
+  fileRenderPending = false;
   window.richNotes?.destroy();
   if (!user) return authScreen();
   const navButton = (t) =>
