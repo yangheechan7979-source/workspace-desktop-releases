@@ -169,6 +169,31 @@ function openSharedLink(keepTrail = false) {
   });
 }
 let recentSort = "recent";
+let selectedFileId = null;
+function selectFile(id) {
+  selectedFileId = id;
+  document.querySelectorAll('[data-file-select]').forEach(element => {
+    const selected = element.dataset.fileSelect === id;
+    element.classList.toggle('file-selected', selected);
+    element.setAttribute('aria-selected', String(selected));
+  });
+}
+function bindFileSelection(element, id, trigger = element) {
+  element.dataset.fileSelect = id;
+  element.tabIndex = 0;
+  trigger.removeAttribute('data-action');
+  trigger.onclick = event => { if (event.target.closest('button') && !event.target.closest('.card-open')) return; event.stopPropagation(); selectFile(id); };
+  trigger.ondblclick = event => { event.preventDefault(); event.stopPropagation(); openFile(id); };
+  if(element!==trigger){
+    element.onclick=event=>{if(!event.target.closest('button'))selectFile(id);};
+    element.ondblclick=event=>{if(!event.target.closest('button')){event.preventDefault();openFile(id);}};
+  }
+  element.onkeydown = event => {
+    if (event.target !== element && event.target !== trigger) return;
+    if (event.key === 'Enter') { event.preventDefault(); openFile(id); }
+    if (event.key === ' ') { event.preventDefault(); selectFile(id); }
+  };
+}
 function searchFiles() {
   flush();
   modal.className = "search-dialog";
@@ -533,7 +558,7 @@ function headerControls() {
   if (sharedSession?.file.type === 'folder' && sharedSession.file.id === opened) return btn('내 작업공간','shared-exit','folder') + (sharedSession.owner === user.id ? btn('공유','share','share-2') : '');
   const searchButton = btn("", "search-files", "search", "icon-action");
   if (["clock", "study"].includes(tab))
-    return btn("전체 화면", "fullscreen", "maximize");
+    return `<button class="icon-action" data-action="clock-mute" title="${clockMuted?'소리 켜기':'음소거'}" aria-label="${clockMuted?'소리 켜기':'음소거'}" aria-pressed="${clockMuted}">${icon(clockMuted?'volume-x':'volume-2')}</button><button class="icon-action" data-action="mini-clock" title="작은 시계" aria-label="작은 시계">${icon('picture-in-picture-2')}</button>` + btn("전체 화면", "fullscreen", "maximize");
   if (tab === "settings") return "";
   if (featureTypes.includes(tab) || tab === "pdf") {
     const editing = Boolean(opened || drafts[tab]);
@@ -691,6 +716,7 @@ function bindContent() {
     const id = row.dataset.openDouble || row.dataset.action?.slice(5);
     const file = files.find(item => item.id === id);
     if (!file) return;
+    bindFileSelection(row.closest('tr'), id, row);
     row.closest('tr').oncontextmenu = event => { event.preventDefault(); menuFile(id); };
     const type = Object.hasOwn(icons, file.type) ? file.type : 'note';
     const symbol = type === 'note' ? 'file' : icons[type];
@@ -702,18 +728,19 @@ function bindContent() {
     row.firstElementChild.replaceWith(badge);
   });
   document.querySelectorAll('.recent-card').forEach(card => {
-    card.oncontextmenu = event => { event.preventDefault(); menuFile(card.querySelector('.card-open').dataset.action.slice(5)); };
-    card.querySelector('.card-dropdown')?.insertAdjacentHTML('afterbegin', btn('공유','share:' + card.querySelector('.card-open').dataset.action.slice(5),'share-2'));
+    const trigger = card.querySelector('.card-open');
+    const id = trigger.dataset.action.slice(5);
+    card.oncontextmenu = event => { event.preventDefault(); selectFile(id); menuFile(id); };
+    card.querySelector('.card-dropdown')?.insertAdjacentHTML('afterbegin', btn('공유','share:' + id,'share-2'));
+    bindFileSelection(card, id, trigger);
   });
+  selectFile(selectedFileId);
   refreshIcons();
   if ($(".recent-heading")) {
     $(".recent-heading").insertAdjacentHTML("beforeend", `<select id="recent-sort" aria-label="파일 정렬"><option value="recent">최근 열기 순</option><option value="modified">수정일 순</option><option value="name">이름 순</option></select>`);
     $("#recent-sort").value = recentSort;
     $("#recent-sort").onchange = e => { recentSort = e.target.value; render(); };
   }
-  document.querySelectorAll("[data-open-double]").forEach((item) => {
-    item.ondblclick = () => openFile(item.dataset.openDouble);
-  });
   if ($("#quick-form")) $("#quick-form").onsubmit = e => {
     e.preventDefault();
     const d = new FormData(e.target), f = current();
@@ -860,6 +887,55 @@ function timerView() {
   const controls = mode === "clock" ? "" : `<div class="actions">${btn(timer.running ? "일시정지" : "시작", "timer-toggle", timer.running ? "pause" : "play", "primary")}${btn("초기화", "timer-reset", "rotate-ccw")}</div><div class="actions timer-setting"><input id="minutes" type="number" min="1" max="240" value="${Math.max(1, Math.ceil(timer.remaining / 60))}" aria-label="분">분 ${btn("설정", "timer-set")}</div>`;
   return `<div class="timer"><div class="actions timer-modes">${modes}</div><div class="clock" id="time">${timeText()}</div><p class="muted">${label}</p>${controls}<div class="stat"><div>완료 세션<h2 id="sessioncount">${localStorage.getItem("sessions:" + user.id) || 0}회</h2></div><div>오늘 날짜<h2>${new Date().toLocaleDateString("ko-KR")}</h2></div></div></div>`;
 }
+let clockMuted = localStorage.getItem('clock-muted') === 'true';
+let clockAudio;
+let miniSource = null;
+function unlockClockAudio() {
+  if (!clockAudio) clockAudio = new (window.AudioContext || window.webkitAudioContext)();
+  if (clockAudio.state === 'suspended') clockAudio.resume().catch(()=>{});
+}
+function clockAlarm() {
+  if (clockMuted || !clockAudio) return;
+  const now=clockAudio.currentTime;
+  for(let i=0;i<3;i++){
+    const oscillator=clockAudio.createOscillator(), gain=clockAudio.createGain(),start=now+i*.24;
+    oscillator.frequency.value=880;gain.gain.setValueAtTime(0,start);gain.gain.linearRampToValueAtTime(.12,start+.02);gain.gain.exponentialRampToValueAtTime(.001,start+.18);
+    oscillator.connect(gain);gain.connect(clockAudio.destination);oscillator.start(start);oscillator.stop(start+.2);
+    oscillator.onended=()=>{oscillator.disconnect();gain.disconnect();};
+  }
+}
+function clockControl(source, action) {
+  unlockClockAudio();
+  const mode=timerModes[source], watch=stopwatches[source];
+  if(action==='mute'){clockMuted=!clockMuted;localStorage.setItem('clock-muted',String(clockMuted));}
+  else if(mode==='stopwatch'){
+    if(action==='toggle'){
+      if(watch.running){watch.elapsed=stopwatchElapsed(watch);watch.running=false;clockAlarm();}
+      else {watch.startedAt=Date.now();watch.running=true;}
+    }
+    if(action==='lap'&&watch.running)watch.laps.push(stopwatchElapsed(watch));
+    if(action==='reset'){watch.elapsed=0;watch.startedAt=0;watch.running=false;watch.laps=[];}
+  }else if(mode!=='clock'){
+    if(action==='toggle'){
+      if(timer.running){timer.remaining=Math.max(0,Math.ceil((timer.end-Date.now())/1000));timer.running=false;}
+      else {timer.end=Date.now()+timer.remaining*1000;timer.running=true;}
+    }
+    if(action==='reset'){timer.running=false;timer.remaining=mode==='short'?300:mode==='long'?900:1500;}
+  }
+  if(tab==='clock'||tab==='study')render();
+  updateMiniClock();
+}
+function miniClockState() {
+  const source=miniSource||'clock',mode=timerModes[source];
+  return {label:(source==='study'?'공부용 시계':'시계')+(mode==='stopwatch'?' · 스톱워치':''),time:timeText(source),mode,running:mode==='stopwatch'?stopwatches[source].running:mode==='clock'?false:timer.running,muted:clockMuted};
+}
+function updateMiniClock() {
+  if(!miniSource)return;
+  if(!user){window.clockWidget?.close();window.desktop?.closeMiniClock?.();miniSource=null;return;}
+  const state=miniClockState();
+  window.clockWidget?.update(state);window.desktop?.updateMiniClock?.(state);
+}
+window.desktop?.onMiniAction?.(action=>{if(user&&miniSource)clockControl(miniSource,action);});
 function activeStopwatch() {
   return stopwatches[tab === "study" ? "study" : "clock"];
 }
@@ -879,9 +955,9 @@ function stopwatchText(milliseconds) {
     : `${String(totalMinutes).padStart(2, "0")}:${String(seconds).padStart(2, "0")}`;
   return `${main}.${String(centiseconds).padStart(2, "0")}`;
 }
-function timeText() {
-  const mode = timerModes[tab] || "clock";
-  if (mode === "stopwatch") return stopwatchText(stopwatchElapsed(activeStopwatch()));
+function timeText(source = tab) {
+  const mode = timerModes[source] || "clock";
+  if (mode === "stopwatch") return stopwatchText(stopwatchElapsed(stopwatches[source]));
   if (mode === "clock")
     return new Date().toLocaleTimeString("ko-KR", { hour12: false });
   const s = timer.running
@@ -893,6 +969,7 @@ setInterval(() => {
   if (timer.running && Date.now() >= timer.end) {
     timer.running = false;
     timer.remaining = 0;
+    clockAlarm();
     if (user) {
       localStorage.setItem(
         "sessions:" + user.id,
@@ -903,6 +980,7 @@ setInterval(() => {
     }
   }
   if ($("#time")) $("#time").textContent = timeText();
+  updateMiniClock();
 }, 250);
 function quizKey(f) {
   return JSON.stringify([user.id, sharedSession?.owner || user.id, f.id]);
@@ -1071,7 +1149,16 @@ document.addEventListener("click", async (e) => {
     }
     if (modal.open) modal.close();
     const f = current();
+    if (['stopwatch-toggle','stopwatch-lap','stopwatch-reset','timer-toggle','timer-reset','clock-mute'].includes(a)) {
+      clockControl(tab,a==='clock-mute'?'mute':a.split('-')[1]);return;
+    }
     switch (a) {
+      case 'mini-clock':
+        unlockClockAudio();miniSource=tab;
+        if(window.desktop?.openMiniClock) await window.desktop.openMiniClock(miniClockState());
+        else await window.clockWidget.open(action=>clockControl(miniSource,action));
+        updateMiniClock();
+        break;
       case 'share':
         await sharingDialog(id || undefined);
         break;
@@ -1443,60 +1530,12 @@ document.addEventListener("click", async (e) => {
         }
         render();
         break;
-      case "timer-toggle":
-        if (timerModes[tab] === "clock" || timerModes[tab] === "stopwatch") break;
-        if (timer.running) {
-          timer.remaining = Math.max(
-            0,
-            Math.ceil((timer.end - Date.now()) / 1000),
-          );
-          timer.running = false;
-        } else {
-          timer.end = Date.now() + timer.remaining * 1000;
-          timer.running = true;
-        }
-        render();
-        break;
-      case "timer-reset":
-        timer.running = false;
-        timer.remaining =
-          timerModes[tab] === "short" ? 300 : timerModes[tab] === "long" ? 900 : 1500;
-        render();
-        break;
       case "timer-set":
         timer.remaining =
           Math.min(240, Math.max(1, Number($("#minutes").value) || 25)) * 60;
         timer.running = false;
         render();
         break;
-      case "stopwatch-toggle": {
-        const watch = activeStopwatch();
-        if (watch.running) {
-          watch.elapsed = stopwatchElapsed(watch);
-          watch.running = false;
-        } else {
-          watch.startedAt = Date.now();
-          watch.running = true;
-        }
-        render();
-        break;
-      }
-      case "stopwatch-lap": {
-        const watch = activeStopwatch();
-        if (!watch.running) break;
-        watch.laps.push(stopwatchElapsed(watch));
-        render();
-        break;
-      }
-      case "stopwatch-reset": {
-        const watch = activeStopwatch();
-        watch.elapsed = 0;
-        watch.startedAt = 0;
-        watch.running = false;
-        watch.laps = [];
-        render();
-        break;
-      }
       case "word-add":
         showModal(
           "단어 추가",

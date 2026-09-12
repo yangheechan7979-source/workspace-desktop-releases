@@ -1,0 +1,12 @@
+.mini-clock { box-sizing:border-box; width:264px; padding:12px; background:#202426; color:#f4f6f7; border:1px solid #647078; border-radius:8px; font:14px system-ui,sans-serif; letter-spacing:0; box-shadow:0 6px 24px #0005; }
+.mini-clock header { display:flex; align-items:center; justify-content:space-between; cursor:grab; touch-action:none; user-select:none; }
+.mini-clock strong { font-size:13px; }
+.mini-clock output { display:block; height:48px; line-height:48px; font-size:30px; text-align:center; font-variant-numeric:tabular-nums; }
+.mini-clock nav { display:flex; justify-content:center; gap:8px; }
+.mini-clock button { display:inline-flex; width:32px; height:32px; padding:6px; align-items:center; justify-content:center; border:1px solid #647078; border-radius:5px; background:#30373b; color:#f4f6f7; cursor:pointer; -webkit-app-region:no-drag; }
+.mini-clock button:disabled { opacity:.35; cursor:default; }
+.mini-clock svg { width:18px; height:18px; }
+.mini-overlay { position:fixed; z-index:90; right:24px; bottom:24px; }
+body.mini-window { margin:0; background:#202426; }
+.mini-window .mini-clock { width:100%; height:100vh; border-radius:0; box-shadow:none; }
+.mini-window header { -webkit-app-region:drag; }

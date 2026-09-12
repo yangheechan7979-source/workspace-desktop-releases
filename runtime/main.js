@@ -3,6 +3,28 @@ const path = require("path");
 const http = require("http");
 const fs = require("fs");
 let localServer, appUrl;
+const miniClocks = new Map();
+function clockState(value) {
+  if (!value || !['clock','stopwatch','focus','short','long'].includes(value.mode)) throw Error('Invalid clock state');
+  return {label:String(value.label).slice(0,40),time:String(value.time).slice(0,30),mode:value.mode,running:!!value.running,muted:!!value.muted};
+}
+ipcMain.handle('mini-open', async (event,value) => {
+  if(!appUrl || !event.sender.getURL().startsWith(appUrl)) throw Error('Invalid clock owner');
+  const state=clockState(value),owner=BrowserWindow.fromWebContents(event.sender);
+  let entry=miniClocks.get(event.sender.id);
+  if(entry){entry.state=state;entry.window.show();entry.window.webContents.send('mini-state',state);return;}
+  const mini=new BrowserWindow({width:280,height:160,minWidth:264,minHeight:150,frame:false,alwaysOnTop:true,skipTaskbar:true,resizable:false,show:false,backgroundColor:'#202426',webPreferences:{preload:path.join(__dirname,'preload.js'),contextIsolation:true,nodeIntegration:false,sandbox:true,backgroundThrottling:false}});
+  entry={window:mini,owner:event.sender,state};miniClocks.set(event.sender.id,entry);
+  mini.webContents.setWindowOpenHandler(()=>({action:'deny'}));
+  mini.webContents.on('will-navigate',e=>e.preventDefault());
+  mini.on('closed',()=>miniClocks.delete(event.sender.id));
+  owner.once('closed',()=>{if(!mini.isDestroyed())mini.close();});
+  await mini.loadURL(new URL('mini.html',appUrl).href);mini.showInactive();
+});
+ipcMain.on('mini-update',(event,value)=>{const entry=miniClocks.get(event.sender.id);if(entry){entry.state=clockState(value);entry.window.webContents.send('mini-state',entry.state);}});
+ipcMain.on('mini-close',event=>miniClocks.get(event.sender.id)?.window.close());
+ipcMain.on('mini-ready',event=>{for(const entry of miniClocks.values())if(entry.window.webContents.id===event.sender.id)event.sender.send('mini-state',entry.state);});
+ipcMain.on('mini-action',(event,action)=>{for(const entry of miniClocks.values())if(entry.window.webContents.id===event.sender.id){if(action==='close')entry.window.close();else if(['toggle','lap','reset','mute'].includes(action))entry.owner.send('mini-owner-action',action);}});
 const ownsInstance = app.requestSingleInstanceLock();
 if (!ownsInstance) app.quit();
 app.on('second-instance', () => {
@@ -37,6 +59,7 @@ function create() {
       contextIsolation: true,
       nodeIntegration: false,
       sandbox: true,
+      backgroundThrottling: false,
     },
   });
   w.setMenuBarVisibility(false);
