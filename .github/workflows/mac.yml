@@ -31,7 +31,7 @@ jobs:
           name: mac-release
           path: dist
       - run: ditto -x -k dist/Workspace-Mac.zip unpacked
-      - run: node check-mac.cjs unpacked/Workspace.app/Contents/MacOS/Workspace
+      - run: node check-mac.cjs unpacked
   publish:
     needs: [build, intel]
     runs-on: ubuntu-latest
