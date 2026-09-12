@@ -177,7 +177,7 @@ let fileRenderPending = false;
 function finishFileDrag() {
   draggingFiles = null;
   document.querySelectorAll('.file-drop-target').forEach(node => node.classList.remove('file-drop-target'));
-  if (fileRenderPending && !transferBusy) render();
+  if (fileRenderPending) render();
 }
 let transferBusy = false;
 function selectFile(id, event) {
@@ -290,7 +290,8 @@ function bindFolderDrop(element,destination) {
   element.ondrop=async event=>{
     if(!draggingFiles||draggingFiles.owner!==user?.id)return;
     event.preventDefault();event.stopPropagation();element.classList.remove('file-drop-target');
-    const ids=draggingFiles.ids;draggingFiles=null;
+    const ids=draggingFiles.ids;
+    setTimeout(finishFileDrag, 0);
     try{await transferFiles(ids,destination,event.ctrlKey||event.altKey?'copy':'move');}catch(error){notice(error.message);}
   };
 }
@@ -642,7 +643,7 @@ async function nav(t) {
 }
 function render() {
   // Replacing the drag source during a live cloud update cancels native dragging.
-  if (user && (draggingFiles || transferBusy)) { fileRenderPending = true; return; }
+  if (user && draggingFiles) { fileRenderPending = true; return; }
   fileRenderPending = false;
   window.richNotes?.destroy();
   if (!user) return authScreen();
