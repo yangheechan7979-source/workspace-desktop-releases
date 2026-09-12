@@ -546,9 +546,25 @@ function render() {
     btn(labels[t], `tab:${t}`, icons[t], tab === t ? "active" : "");
   $("#app").innerHTML =
     `<div class="shell"><aside class="sidebar ${collapsed ? "collapsed" : ""}"><div class="brand"><span class="mark">W</span><strong>Workspace</strong>${btn("", "collapse", "panel-left-close")}</div><nav class="nav">${["clock", "idea", "note", "study", "plan", "pdf", "words", "calendar"].map(navButton).join("")}<label>자료 관리</label>${["workspace", "favorites", "recent", "trash"].map(navButton).join("")}<label>시스템</label>${btn("새 창", "new-window", "panels-top-left")}${btn("비밀번호 변경", "password", "key-round")}${navButton("settings")}</nav><div class="account">${btn("계정", "account", "user-round")}${btn("로그아웃", "logout", "log-out")}</div></aside><main class="main"><header class="top"><div><h1>${esc(labels[tab])}</h1><div class="status">${esc(sync)}</div></div><div class="actions">${headerActions()}</div></header><section class="content">${content()}</section></main></div>`;
+  const titleGroup = $('.top > div');
+  titleGroup.classList.add('header-title');
+  titleGroup.insertAdjacentHTML('afterbegin', '<button type="button" class="icon-action header-fullscreen" data-action="fullscreen"></button>');
+  updateFullscreenButton();
   refreshIcons();
   bindContent();
 }
+function updateFullscreenButton() {
+  const button = $('.header-fullscreen');
+  if (!button) return;
+  const active = Boolean(document.fullscreenElement);
+  button.title = active ? '전체 화면 나가기' : '전체 화면';
+  button.setAttribute('aria-label', button.title);
+  button.setAttribute('aria-pressed', String(active));
+  button.disabled = !document.fullscreenEnabled;
+  button.innerHTML = icon(active ? 'minimize' : 'maximize');
+  refreshIcons();
+}
+document.addEventListener('fullscreenchange', updateFullscreenButton);
 function headerActions() {
   const file = current();
   const enabled = file && !file.deleted && (!sharedSession || sharedSession.owner === user.id);
@@ -558,7 +574,7 @@ function headerControls() {
   if (sharedSession?.file.type === 'folder' && sharedSession.file.id === opened) return btn('내 작업공간','shared-exit','folder') + (sharedSession.owner === user.id ? btn('공유','share','share-2') : '');
   const searchButton = btn("", "search-files", "search", "icon-action");
   if (["clock", "study"].includes(tab))
-    return `<button class="icon-action" data-action="clock-mute" title="${clockMuted?'소리 켜기':'음소거'}" aria-label="${clockMuted?'소리 켜기':'음소거'}" aria-pressed="${clockMuted}">${icon(clockMuted?'volume-x':'volume-2')}</button><button class="icon-action" data-action="mini-clock" title="작은 시계" aria-label="작은 시계">${icon('picture-in-picture-2')}</button>` + btn("전체 화면", "fullscreen", "maximize");
+    return `<button class="icon-action" data-action="clock-mute" title="${clockMuted?'소리 켜기':'음소거'}" aria-label="${clockMuted?'소리 켜기':'음소거'}" aria-pressed="${clockMuted}">${icon(clockMuted?'volume-x':'volume-2')}</button><button class="icon-action" data-action="mini-clock" title="작은 시계" aria-label="작은 시계">${icon('picture-in-picture-2')}</button>`;
   if (tab === "settings") return "";
   if (featureTypes.includes(tab) || tab === "pdf") {
     const editing = Boolean(opened || drafts[tab]);
@@ -1518,9 +1534,9 @@ document.addEventListener("click", async (e) => {
         break;
       }
       case "fullscreen":
-        document.fullscreenElement
+        await (document.fullscreenElement
           ? document.exitFullscreen()
-          : document.documentElement.requestFullscreen();
+          : document.documentElement.requestFullscreen());
         break;
       case "mode":
         timerModes[tab] = id;
