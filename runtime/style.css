@@ -543,3 +543,17 @@ dialog .actions {
     grid-template-columns: 210px 1fr;
   }
 }
+.quiz-screen { max-width: 820px; margin: 0 auto; min-width: 0; }
+.quiz-screen input { width: 100%; box-sizing: border-box; }
+.quiz-screen progress { width: 100%; height: 8px; accent-color: #268d75; }
+.quiz-screen .quiz-prompt { font-size: 32px; line-height: 1.5; }
+.quiz-feedback { display: flex; align-items: center; gap: 16px; min-height: 76px; }
+.quiz-mark { display: inline-flex; flex: 0 0 56px; width: 56px; height: 56px; align-items: center; justify-content: center; font-size: 44px; font-weight: 700; }
+.quiz-mark.correct { color: #238443; }
+.quiz-mark.incorrect { color: #dc3535; }
+.dark .quiz-mark.correct { color: #60d58b; }
+.dark .quiz-mark.incorrect { color: #ff7777; }
+.quiz-history { margin-top: 36px; border-top: 1px solid var(--line, #58616b); padding-top: 20px; }
+.quiz-history details { border-bottom: 1px solid var(--line, #58616b); padding: 16px 0; }
+.quiz-history summary { cursor: pointer; overflow-wrap: anywhere; }
+.quiz-history-answer { display: grid; gap: 8px; padding: 16px 0; overflow-wrap: anywhere; }

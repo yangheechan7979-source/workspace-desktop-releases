@@ -614,6 +614,7 @@ function startTemplate(type, kind) {
 function featureContent() {
   const f = current();
   if (f) {
+    if (f.type === 'words' && window.wordTools.active(quizKey(f))) return wordsView(f);
     if (f.type === "idea") return `<div class="idea-layout"><div><h2>아이디어 메모</h2><input class="title-input" id="edit-title" aria-label="제목" maxlength="200" value="${esc(f.name)}"><textarea id="edit-body" aria-label="내용" placeholder="떠오른 생각을 적어보세요">${esc(f.body)}</textarea></div><aside><h2>저장한 아이디어</h2><div class="list">${files.filter(x => x.type === "idea" && !x.deleted).map(x => btn(esc(x.name), "open:" + x.id, "lightbulb")).join("")}</div></aside></div>`;
     if (f.type === "words") return `<form id="quick-form" class="quick-form"><input name="word" required aria-label="단어" placeholder="단어"><input name="meaning" required aria-label="뜻" placeholder="뜻"><button type="submit" class="primary">단어 저장</button></form>` + wordsView(f);
     if (f.type === "plan") return `<form id="quick-form" class="quick-form"><input name="text" required aria-label="할 일" placeholder="오늘 할 일"><input name="date" type="date" aria-label="마감일"><button type="submit" class="primary">추가</button></form>` + planView(f);
@@ -660,8 +661,9 @@ function bindContent() {
     saveTimer = setTimeout(flush, 600);
   });
   if (current()?.type === "pdf") ensurePdfLoaded(current());
-  if (current()?.type === 'words') {
+  if (current()?.type === 'words' && !window.wordTools.active(quizKey(current()))) {
     $('.content .actions')?.insertAdjacentHTML('afterend', `<div class="actions" style="margin-top:18px">${btn('퀴즈','word-quiz','circle-help')}</div>`);
+    $('.content')?.insertAdjacentHTML('beforeend', window.wordTools.historyView(quizKey(current())));
   }
   if (current() && !sharedSession && $('.feature-actions')) $('.feature-actions').insertAdjacentHTML('afterbegin', btn('공유','share','share-2'));
   if (sharedSession && sharedSession.owner !== user.id) {
@@ -672,6 +674,10 @@ function bindContent() {
     document.querySelectorAll('.content button').forEach(button => {
       if (!['word-quiz','word-prev','word-next','reveal','speak','month-prev','month-next','month-today'].includes(button.dataset.action)) button.disabled = true;
     });
+  }
+  if (current()?.type === 'words') {
+    document.querySelectorAll('.quiz-screen input,.quiz-screen button').forEach(control => control.disabled = false);
+    window.wordTools.mount(quizKey(current()), render);
   }
   document.querySelectorAll('.table .filename').forEach(row => {
     const id = row.dataset.openDouble || row.dataset.action?.slice(5);
@@ -883,7 +889,11 @@ setInterval(() => {
   }
   if ($("#time")) $("#time").textContent = timeText();
 }, 250);
+function quizKey(f) {
+  return JSON.stringify([user.id, sharedSession?.owner || user.id, f.id]);
+}
 function wordsView(f) {
+  if (window.wordTools.active(quizKey(f))) return window.wordTools.view(quizKey(f));
   const w = f.words[wordIndex];
   return `<div class="actions">${btn("단어 추가", "word-add", "plus")}${btn("CSV 가져오기", "word-import", "upload")}<span class="muted">${esc(f.name)} · ${f.words.length}개</span></div>${w ? `<div class="split"><div class="list" style="margin-top:30px">${f.words.map((x, i) => btn(esc(x.word), "word:" + i, "", i === wordIndex ? "primary" : "")).join("")}</div><div class="flash"><div class="word">${esc(w.word)}</div>${btn("발음", "speak", "volume-2")}<h2>${reveal ? esc(w.meaning) : "•••"}</h2><p>${reveal ? esc(w.example) : ""}</p><div class="actions" style="justify-content:center">${btn("이전", "word-prev", "chevron-left")}${btn(reveal ? "뜻 가리기" : "뜻 보기", "reveal", "eye")}${btn("다음", "word-next", "chevron-right")}</div><p>${wordIndex + 1} / ${f.words.length}</p>${btn(w.known ? "암기 완료" : "암기 완료로 표시", "known", "check")}${btn("삭제", "word-delete", "trash-2")}</div></div>` : '<div class="empty">첫 단어를 추가해주세요.</div>'}`;
 }
@@ -1501,7 +1511,7 @@ document.addEventListener("click", async (e) => {
         break;
       }
       case 'word-quiz':
-        window.wordTools.quiz(f.words || []);
+        window.wordTools.quiz(f.words || [], quizKey(f), render);
         break;
       case "word-import":
         window.wordTools.import(async words => {
