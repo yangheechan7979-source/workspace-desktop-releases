@@ -1,6 +1,8 @@
 (() => {
   const currentVersion = document.querySelector('meta[name="workspace-version"]').content;
-  const endpoint = 'https://workspace-app-jeh.pages.dev/version.json';
+  const desktop = Boolean(window.desktop);
+  const endpoint = 'https://workspace-app-jeh.pages.dev/' + (desktop ? 'version.json' : 'web-version.json');
+  const dismissedKey = desktop ? 'update-dismissed' : 'update-dismissed:web';
   let pending = null;
   let checking = false;
   async function check() {
@@ -11,7 +13,7 @@
       if (!response.ok) return;
       const release = await response.json();
       if (!Number.isSafeInteger(release.version) || release.version <= Number(currentVersion)) return;
-      if (localStorage.getItem('update-dismissed') === String(release.version)) return;
+      if (localStorage.getItem(dismissedKey) === String(release.version)) return;
       pending = release;
       show();
     } catch { /* An offline check can wait until the next interval. */ }
@@ -21,11 +23,10 @@
     if (!pending || document.querySelector('dialog[open]')) return;
     const dialog = document.createElement('dialog');
     dialog.id = 'update-dialog';
-    const desktop = Boolean(window.desktop);
     dialog.innerHTML = `<h2>Workspace 새 버전이 출시되었습니다</h2><p>${desktop ? '새로운 기능과 개선 사항이 추가되었습니다. 새 데스크톱 버전을 설치해주세요.' : '새로운 기능과 개선 사항이 추가되었습니다.'}</p><p id="update-error" role="status"></p><div class="actions"><button type="button" id="update-later">나중에</button>${desktop ? '<button type="button" id="update-close" class="primary">확인</button>' : '<button type="button" id="update-now" class="primary">업데이트</button>'}</div>`;
     document.body.appendChild(dialog);
     const dismiss = () => {
-      localStorage.setItem('update-dismissed', String(pending.version));
+      localStorage.setItem(dismissedKey, String(pending.version));
       pending = null;
       dialog.close();dialog.remove();
     };

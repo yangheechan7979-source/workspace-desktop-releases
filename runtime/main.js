@@ -93,7 +93,7 @@ function startLocalServer() {
         response.writeHead(403).end();
         return;
       }
-      const types = { ".html": "text/html", ".js": "text/javascript", ".css": "text/css", ".png": "image/png", ".ico": "image/x-icon" };
+      const types = { ".html": "text/html", ".js": "text/javascript", ".mjs": "text/javascript", ".json": "application/json", ".webmanifest": "application/manifest+json", ".css": "text/css", ".png": "image/png", ".ico": "image/x-icon" };
       fs.readFile(file, (error, data) => {
         if (error) response.writeHead(404).end();
         else response.writeHead(200, { "Content-Type": types[path.extname(file)] || "application/octet-stream" }).end(data);

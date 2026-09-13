@@ -474,6 +474,22 @@ dialog select {
 dialog .actions {
   justify-content: flex-end;
 }
+dialog.share-intake {
+  box-sizing: border-box;
+  width: min(640px, calc(100vw - 24px));
+  max-height: calc(100dvh - 32px);
+  overflow: auto;
+}
+dialog.share-intake .actions {
+  flex-wrap: wrap;
+}
+dialog.share-intake h2 {
+  word-break: keep-all;
+}
+dialog.share-intake button {
+  white-space: normal;
+  max-width: 100%;
+}
 #toast {
   position: fixed;
   bottom: 25px;

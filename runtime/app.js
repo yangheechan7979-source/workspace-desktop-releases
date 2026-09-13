@@ -16,6 +16,7 @@ const btn = (text, act, ic = "", cl = "") =>
   `<button type="button" class="${cl}" data-action="${act}"${text ? ` title="${esc(text)}" aria-label="${esc(text)}"` : ""}>${ic ? icon(ic) : ""}${text ? `<span>${text}</span>` : ""}</button>`;
 const labels = {
   workspace: "내 작업공간",
+  shared: "공유폴더",
   clock: "시계",
   idea: "아이디어",
   note: "노트",
@@ -31,6 +32,7 @@ const labels = {
 };
 const icons = {
   workspace: "folder",
+  shared: "folder-symlink",
   clock: "clock",
   idea: "lightbulb",
   note: "file-text",
@@ -102,15 +104,11 @@ function closeDocument(destination = tab) {
     buttons.forEach(button=>button.disabled=true);
     try {
       if (shareSaving) throw Error('저장 중입니다. 잠시 후 다시 눌러주세요.');
-      const saved = JSON.parse(JSON.stringify(file));
       if (session && session.owner !== user.id) {
-        saved.id=crypto.randomUUID();saved.parent=null;saved.created=Date.now();
-        delete saved.shareId;delete saved.revision;
-        if (saved.type === 'pdf') {
-          saved.data = await blobDataUrl(await pdfBlob(file));
-          saved.hasPdfBody = true;
-        }
+        if (shareDirty && !await persist(file)) throw Error('공유 파일을 저장하지 못했습니다.');
+        finish();return;
       }
+      const saved = JSON.parse(JSON.stringify(file));
       saved.modified=Date.now();
       if (user.cloud) await cloud.save(user.id,saved);
       const index=files.findIndex(item=>item.id===saved.id);
@@ -127,6 +125,10 @@ let sharingTarget = null;
 async function sharingDialog(targetId) {
   const file = targetId ? files.find(item => item.id === targetId && !item.deleted) : current();
   if (!file || !user.cloud) return notice('로그인 후 저장한 파일을 공유할 수 있습니다.');
+  if (file.sharedLink) {
+    showModal('공유문서 링크', `<p>원본 소유자가 정한 권한으로 열립니다.</p><input aria-label="공유 링크" readonly value="https://workspace-app-jeh.pages.dev/#share=${esc(file.sharedLink)}">${btn('링크 복사','shared-copy:'+file.sharedLink,'copy')}`,()=>{});
+    return;
+  }
   if (!targetId && sharedSession && sharedSession.owner !== user.id) return notice('소유자만 공유 권한을 변경할 수 있습니다.');
   sharingTarget = file;
   flush();
@@ -141,14 +143,115 @@ async function sharingDialog(targetId) {
   modal.querySelector('select').value = info?.role || 'viewer';
 }
 let sharedFolderTrail = [];
-function openSharedLink(keepTrail = false) {
+function importShareDialog() {
+  if(!user?.cloud)return notice('클라우드 계정으로 로그인해주세요.');
+  const account=user.id;
+  modal.className='';
+  modal.innerHTML='<form id="share-import-form"><h2>공유 링크로 불러오기</h2><label for="share-import-url">공유 폴더 또는 문서 링크</label><input id="share-import-url" name="link" type="text" required autocomplete="off" spellcheck="false" placeholder="https://workspace-app-jeh.pages.dev/#share=…"><p id="share-import-error" role="alert"></p><div class="actions"><button type="button" id="share-import-cancel">취소</button><button type="submit" class="primary">불러오기</button></div></form>';
+  const form=$('#share-import-form');
+  let busy=false;
+  $('#share-import-cancel').onclick=()=>modal.close();
+  form.onsubmit=async event=>{
+    event.preventDefault();if(busy)return;
+    const submit=form.querySelector('[type="submit"]');
+    const active=()=>modal.open&&modal.contains(form)&&user?.id===account;
+    try {
+      const url=new URL(form.elements.link.value.trim(),'https://workspace-app-jeh.pages.dev/');
+      const params=new URLSearchParams(url.hash.slice(1)),id=params.get('share');
+      if(url.protocol!=='https:'||url.username||url.password||!(url.hostname==='workspace-app-jeh.pages.dev'||url.hostname.endsWith('.workspace-app-jeh.pages.dev'))||params.getAll('share').length!==1||!id||!/^\w[\w-]{0,127}$/.test(id))throw Error('Workspace의 올바른 공유 링크를 입력해주세요.');
+      busy=true;submit.disabled=true;$('#share-import-error').textContent='링크 확인 중…';
+      await cloud.readShare(id);
+      if(!active())return;
+      modal.close();
+      history.pushState(null,'','#share='+encodeURIComponent(id));
+      openSharedLink();
+    } catch(error){if(active())$('#share-import-error').textContent=error.message||'공유 링크를 불러오지 못했습니다.';}
+    finally{busy=false;submit.disabled=false;}
+  };
+  modal.showModal();$('#share-import-url').focus();
+}
+let shareRequest = 0;
+async function copyReceivedShare(id, account, valid) {
+  const copies = [], path = new Set();
+  let bytes = 0;
+  const visit = async (link, parent) => {
+    if (!valid() || user?.id !== account) throw Error('공유 링크 또는 계정이 변경되었습니다.');
+    if (path.has(link) || copies.length >= 250) throw Error('폴더 구조가 순환하거나 파일이 너무 많습니다. 하위 폴더를 나누어 복사해주세요.');
+    path.add(link);
+    const {file,info} = await cloud.readShare(link);
+    if (file.sharedLink) throw Error('공유문서 바로가기는 원본 링크에서 따로 저장해주세요.');
+    const copy = JSON.parse(JSON.stringify(file));
+    copy.id=crypto.randomUUID();copy.parent=parent;copy.created=copy.modified=Date.now();copy.star=false;copy.deleted=false;
+    for (const key of ['shareId','revision','sharedEntries','sharedLink','trashGroup','lastOpened']) delete copy[key];
+    if (copy.type==='pdf') {
+      copy.data=file.data || await cloud.loadPdf(info.owner,file.id);
+      copy.hasPdfBody=true;
+    }
+    bytes+=new Blob([JSON.stringify(copy)]).size;
+    if (bytes>14*1024*1024) throw Error('한 번에 복사할 용량을 초과했습니다. PDF나 하위 폴더를 나누어 저장해주세요.');
+    copies.push(copy);
+    if (file.type==='folder') for (const child of Object.values(file.sharedEntries || {})) await visit(child.shareId,copy.id);
+    path.delete(link);
+  };
+  await visit(id,null);
+  if (!valid() || user?.id!==account) throw Error('공유 링크 또는 계정이 변경되었습니다.');
+  await cloud.transferFiles(account,copies,[]);
+  return copies;
+}
+function receiveShareDialog(id, getLatest, valid, accept) {
+  modal.close();modal.className='share-intake';modal.dataset.shareIntake=id;
+  modal.innerHTML=`<h2>내 계정의 작업파일에 저장하겠습니까?</h2><p>${esc(getLatest().file.name)}</p><p>공유문서는 원본과 연결됩니다. 개인용 사본은 원본과 별도로 저장됩니다.</p><p role="status" id="share-receive-error"></p><div class="actions"><button type="button" id="share-receive-cancel">취소</button><button type="button" id="share-receive-personal">사본(개인용)으로 저장하기</button><button type="button" id="share-receive-linked" class="primary">공유문서로 저장하기</button></div>`;
+  const account=user.id;
+  const cancel=()=>{
+    if (!valid()) return;
+    stopShared?.();sharedSession=null;opened=null;tab='workspace';folder=null;
+    history.replaceState(null,'',location.pathname+location.search);render();
+  };
+  $('#share-receive-cancel').onclick=cancel;
+  modal.oncancel=cancel;
+  const save=async personal=>{
+    const buttons=modal.querySelectorAll('button');buttons.forEach(button=>button.disabled=true);
+    try {
+      if (!user?.cloud) throw Error('클라우드 계정으로 로그인해주세요.');
+      let saved;
+      if (personal) saved=await copyReceivedShare(id,account,valid);
+      else {
+        const {file}=await cloud.readShare(id);
+        if (!valid() || user?.id!==account) return;
+        const existing=files.find(item=>item.sharedLink===id&&!item.deleted);
+        const reference={id:existing?.id || 'shared-'+id,name:file.name,type:file.type,sharedLink:id,parent:existing?.parent||null,created:existing?.created||Date.now(),modified:Date.now(),deleted:false,star:existing?.star||false};
+        await cloud.save(account,reference);saved=[reference];
+      }
+      if (!valid() || user?.id!==account) return;
+      for(const file of saved){const index=files.findIndex(item=>item.id===file.id);if(index<0)files.push(file);else files[index]=file;}
+      try{cache();}catch{notice('클라우드에 저장했습니다. 이 기기의 캐시 공간이 부족합니다.');}
+      modal.close();modal.oncancel=null;delete modal.dataset.shareIntake;
+      if(personal){stopShared?.();sharedSession=null;parkedShare=null;opened=null;tab='workspace';folder=null;history.replaceState(null,'',location.pathname+location.search);await openFile(saved[0].id);}
+      else accept();
+      notice(personal?'개인용 사본을 작업공간에 저장했습니다.':'공유문서를 작업공간에 저장했습니다.');
+    } catch(error){if(valid()){$('#share-receive-error').textContent=error.message;buttons.forEach(button=>button.disabled=false);}}
+  };
+  $('#share-receive-linked').onclick=()=>save(false);
+  $('#share-receive-personal').onclick=()=>save(true);
+  modal.showModal();
+}
+function openSharedLink(keepTrail = false, accepted = false) {
   if (!keepTrail) sharedFolderTrail = [];
   const id = new URLSearchParams(location.hash.slice(1)).get('share');
   if (!id || !user) return;
   stopShared?.();
+  if (!/^[\w-]{1,128}$/.test(id)) return notice('공유 링크가 올바르지 않습니다.');
+  const token=++shareRequest, account=user.id;
+  const valid=()=>token===shareRequest&&user?.id===account;
   parkedShare = null;
+  sharedSession = null;
+  opened = null;
   shareDirty = false;
-  stopShared = cloud.watchShare(id, (file, info) => {
+  let latest, prompted=false, ready=keepTrail||accepted;
+  const display=()=>{
+    if(!valid()||!latest)return;
+    ready=true;
+    const {file,info}=latest;
     if (parkedShare?.id === id) {
       if (!shareDirty) parkedShare.file=normalizeFile(file);
       parkedShare.role=info.role;
@@ -157,29 +260,148 @@ function openSharedLink(keepTrail = false) {
     const canEdit = info.owner === user.id || info.role === 'editor';
     if (sharedSession?.file.id === file.id && shareDirty && canEdit) { sharedSession.role = info.role; return; }
     sharedSession = {...info, file:normalizeFile(file), id};
-    tab = file.type === 'folder' ? 'workspace' : file.type;
+    tab = file.type === 'folder' ? 'shared' : file.type;
     opened = file.id;
     sync = canEdit ? '공유 파일 · 편집 가능' : '공유 파일 · 읽기 전용';
     render();
+  };
+  const unsubscribe = cloud.watchShare(id, (file, info) => {
+    if(!valid())return;
+    latest={file,info};
+    if(ready || info.owner===account)display();
+    else if(!prompted){prompted=true;receiveShareDialog(id,()=>latest,valid,display);}
   }, error => {
+    if(!valid())return;
     if (parkedShare?.id === id) { delete openedTabs[parkedShare.file.type];parkedShare=null; }
     else { sharedSession = null; opened = null; }
-    stopShared?.(); render();
+    stopShared?.(); tab='workspace';folder=null;render();
     notice(error.message || '공유 파일을 열 수 없습니다.');
   });
+  stopShared=()=>{
+    unsubscribe();
+    if(token===shareRequest)shareRequest++;
+    if(modal.dataset.shareIntake===id){modal.close();modal.oncancel=null;delete modal.dataset.shareIntake;}
+  };
 }
 let recentSort = "recent";
 let selectedFileId = null;
 const selectedFileIds = new Set();
 let fileClipboard = null;
 let draggingFiles = null;
+let filePointer = null;
+let suppressFileClick = false;
 let fileRenderPending = false;
 function finishFileDrag() {
+  const pointer=filePointer;filePointer=null;
+  if(pointer?.source.hasPointerCapture(pointer.id))pointer.source.releasePointerCapture(pointer.id);
   draggingFiles = null;
+  document.querySelector('.file-drag-preview')?.remove();
+  document.body.classList.remove('file-dragging');
   document.querySelectorAll('.file-drop-target').forEach(node => node.classList.remove('file-drop-target'));
   if (fileRenderPending) render();
 }
+function scheduleFileDragEnd() {
+  const session=draggingFiles;
+  if (!session) return;
+  // Let the current drop/click finish before replacing its DOM nodes.
+  setTimeout(()=>{if(draggingFiles===session)finishFileDrag();},0);
+}
+document.addEventListener('dragend',scheduleFileDragEnd,true);
+document.addEventListener('drop',scheduleFileDragEnd,true);
+document.addEventListener('pointerup',scheduleFileDragEnd,true);
+document.addEventListener('mouseup',scheduleFileDragEnd,true);
+document.addEventListener('click',scheduleFileDragEnd,true);
+document.addEventListener('keydown',event=>{if(event.key==='Escape')scheduleFileDragEnd();},true);
+window.addEventListener('blur',scheduleFileDragEnd);
+document.addEventListener('visibilitychange',()=>{if(document.hidden)scheduleFileDragEnd();});
+document.addEventListener('pointermove',event=>{
+  const pointer=filePointer;
+  if(!pointer||pointer.id!==event.pointerId)return;
+  if(!(event.buttons&1)||!pointer.source.isConnected){finishFileDrag();return;}
+  if(!draggingFiles){
+    if(Math.hypot(event.clientX-pointer.x,event.clientY-pointer.y)<8)return;
+    if(!selectedFileIds.has(pointer.fileId))selectFile(pointer.fileId);
+    draggingFiles={owner:user.id,ids:[...selectedFileIds]};
+    pointer.source.setPointerCapture(event.pointerId);
+    document.body.classList.add('file-dragging');
+    const preview=document.createElement('div');preview.className='file-drag-preview';
+    preview.textContent=draggingFiles.ids.length===1?files.find(file=>file.id===pointer.fileId)?.name:`${draggingFiles.ids.length}개 항목`;
+    document.body.append(preview);
+  }
+  event.preventDefault();
+  const preview=document.querySelector('.file-drag-preview');
+  preview.style.left=Math.max(0,Math.min(event.clientX+14,innerWidth-preview.offsetWidth-8))+'px';
+  preview.style.top=Math.max(0,Math.min(event.clientY+14,innerHeight-preview.offsetHeight-8))+'px';
+  document.querySelectorAll('.file-drop-target').forEach(node=>node.classList.remove('file-drop-target'));
+  document.elementFromPoint(event.clientX,event.clientY)?.closest('[data-file-drop]')?.classList.add('file-drop-target');
+},true);
+document.addEventListener('pointerup',event=>{
+  if(filePointer?.id!==event.pointerId)return;
+  const session=draggingFiles;
+  const target=document.elementFromPoint(event.clientX,event.clientY)?.closest('[data-file-drop]');
+  const destination=target?.dataset.fileDrop||null;
+  if(session){
+    suppressFileClick=true;
+    setTimeout(()=>{suppressFileClick=false;},0);
+  }
+  finishFileDrag();
+  if(session&&target&&session.owner===user?.id)transferFiles(session.ids,destination,event.ctrlKey||event.altKey?'copy':'move').catch(error=>notice(error.message));
+},true);
+document.addEventListener('pointercancel',()=>{if(filePointer)finishFileDrag();},true);
+document.addEventListener('lostpointercapture',event=>{if(filePointer?.id===event.pointerId)finishFileDrag();},true);
+document.addEventListener('click',event=>{
+  if(suppressFileClick){event.preventDefault();event.stopImmediatePropagation();}
+},true);
 let transferBusy = false;
+let fileChangeBusy = false;
+function fileActionTargets(id) {
+  const visible = new Set([...document.querySelectorAll('[data-file-select]')].map(node => node.dataset.fileSelect));
+  const ids = selectedFileIds.has(id) ? [...selectedFileIds].filter(value => visible.has(value)) : [id];
+  return files.filter(file => ids.includes(file.id));
+}
+async function changeFiles(changes, removals = []) {
+  if (fileChangeBusy || transferBusy) throw Error('파일을 처리 중입니다. 잠시 기다려주세요.');
+  if (sharedSession) throw Error('내 작업공간에서 파일을 변경해주세요.');
+  const owner = user.id;
+  fileChangeBusy = true;
+  try {
+    const removed = new Set(removals), updates = new Map(changes.map(item => [item.id,item.fields]));
+    const apply = () => files.filter(file => !removed.has(file.id)).map(file => updates.has(file.id) ? {...file,...updates.get(file.id)} : file);
+    if (user.cloud) await cloud.changeFiles(owner,changes,removals);
+    else localStorage.setItem('files:'+owner,JSON.stringify(apply()));
+    if (user?.id !== owner) return;
+    files = apply();
+    for (const id of removals) {
+      if (pdfUrls.has(id)) URL.revokeObjectURL(pdfUrls.get(id));
+      pdfUrls.delete(id);pdfBlobs.delete(id);pdfLoads.delete(id);
+    }
+    for (const [type,id] of Object.entries(openedTabs)) if (removed.has(id) || files.find(file => file.id === id)?.deleted) delete openedTabs[type];
+    if (removed.has(opened) || files.find(file => file.id === opened)?.deleted) opened = null;
+    selectedFileIds.clear();selectedFileId=null;
+    render();
+  } finally { fileChangeBusy = false; }
+}
+function trashChanges(targets, restore) {
+  const changes = new Map();
+  if (!restore) targets = targets.filter(file => {
+    let parent=file.parent;const seen=new Set();
+    while(parent&&!seen.has(parent)){if(targets.some(item=>item.id===parent))return false;seen.add(parent);parent=files.find(item=>item.id===parent)?.parent;}return true;
+  });
+  for (const root of targets) {
+    const descendants = new Set([root.id]);
+    let growth = true;
+    while (growth) { growth=false; for (const file of files) if (descendants.has(file.parent) && !descendants.has(file.id)) {descendants.add(file.id);growth=true;} }
+    for (const file of files) if (descendants.has(file.id)) {
+      if (!restore && !file.deleted && !changes.has(file.id)) changes.set(file.id,{deleted:true,trashGroup:root.id,modified:Date.now()});
+      if (restore && file.deleted && (file.id === root.id || file.trashGroup === root.id)) changes.set(file.id,{deleted:false,trashGroup:null,modified:Date.now()});
+    }
+  }
+  if (restore) for (const [id,fields] of changes) {
+    const file=files.find(item=>item.id===id),parent=files.find(item=>item.id===file.parent);
+    if (file.parent && (!parent || (parent.deleted && !changes.has(parent.id)))) fields.parent=null;
+  }
+  return [...changes].map(([id,fields])=>({id,fields}));
+}
 function selectFile(id, event) {
   if(event?.shiftKey && selectedFileId){
     const visible=[...document.querySelectorAll('[data-file-select]')].map(node=>node.dataset.fileSelect);
@@ -196,11 +418,20 @@ function paintFileSelection() {
     element.classList.toggle('file-selected', selected);
     element.classList.toggle('file-cut', fileClipboard?.owner===user?.id && fileClipboard.mode==='move' && fileClipboard.ids.includes(element.dataset.fileSelect));
     element.setAttribute('aria-selected', String(selected));
+    const checkbox=element.querySelector('.file-select-toggle');
+    if(checkbox)checkbox.checked=selected;
   });
 }
 function bindFileSelection(element, id, trigger = element) {
   element.dataset.fileSelect = id;
   element.tabIndex = 0;
+  const checkbox=document.createElement('input');
+  checkbox.type='checkbox';checkbox.className='file-select-toggle';
+  checkbox.setAttribute('aria-label',`${files.find(file=>file.id===id)?.name || '파일'} 선택`);
+  checkbox.addEventListener('click',event=>{event.stopPropagation();selectFile(id,{ctrlKey:true});});
+  if(element.tagName==='TR'){
+    const host=element.querySelector('.filename');host.insertBefore(checkbox,host.children[1]||null);
+  }else element.prepend(checkbox);
   trigger.removeAttribute('data-action');
   trigger.onclick = event => { if (event.target.closest('button') && !event.target.closest('.card-open')) return; event.stopPropagation(); element.focus(); selectFile(id,event); };
   trigger.ondblclick = event => { event.preventDefault(); event.stopPropagation(); openFile(id); };
@@ -213,15 +444,16 @@ function bindFileSelection(element, id, trigger = element) {
     if (event.key === 'Enter') { event.preventDefault(); openFile(id); }
     if (event.key === ' ') { event.preventDefault(); selectFile(id); }
   };
-  element.draggable = tab !== 'trash';
-  element.ondragstart = event => {
-    if(!selectedFileIds.has(id))selectFile(id);
-    draggingFiles={owner:user.id,ids:[...selectedFileIds]};
-    event.dataTransfer.setData('application/x-workspace-files',JSON.stringify(draggingFiles));
-    event.dataTransfer.effectAllowed='copyMove';
+  element.draggable=false;
+  element.dataset.fileDraggable=String(tab!=='trash');
+  element.ondragstart=event=>event.preventDefault();
+  element.onpointerdown=event=>{
+    if(tab==='trash'||!user||event.button!==0||event.pointerType==='touch'||event.target.closest('input,select,textarea,button:not(.card-open)'))return;
+    if(filePointer)finishFileDrag();
+    filePointer={id:event.pointerId,fileId:id,source:element,x:event.clientX,y:event.clientY};
   };
-  element.ondragend=finishFileDrag;
-  if(files.find(file=>file.id===id)?.type==='folder' && tab!=='trash')bindFolderDrop(element,id);
+  const file=files.find(file=>file.id===id);
+  if(file?.type==='folder'&&!file.sharedLink&&tab!=='trash')bindFolderDrop(element,id);
 }
 function fileDescendants(ids) {
   const result=new Set(ids);let changed=true;
@@ -239,7 +471,7 @@ function clipboardFiles(mode,id) {
 async function transferFiles(ids,destination,mode) {
   if(transferBusy)throw Error('파일을 처리 중입니다. 잠시 기다려주세요.');
   if(sharedSession)throw Error('내 작업공간에서 파일을 이동해주세요.');
-  if(destination&&!files.some(file=>file.id===destination&&file.type==='folder'&&!file.deleted))throw Error('대상 폴더를 찾을 수 없습니다.');
+  if(destination&&!files.some(file=>file.id===destination&&file.type==='folder'&&!file.deleted&&!file.sharedLink))throw Error('내 계정의 일반 폴더를 선택해주세요.');
   const selected=new Set(ids);
   const roots=files.filter(file=>selected.has(file.id)&&!file.deleted).filter(file=>{
     let parent=file.parent;const seen=new Set();
@@ -266,7 +498,7 @@ async function transferFiles(ids,destination,mode) {
         if(rootIds.has(original.id)){
           let name=original.name,n=1;while(names.has(name)){const suffix=` (${n===1?'복사본':'복사본 '+n})`;name=original.name.slice(0,200-suffix.length)+suffix;n++;}copy.name=name;names.add(name);
         }
-        if(copy.type==='pdf'){copy.data=await blobDataUrl(await pdfBlob(original));copy.hasPdfBody=true;}
+        if(copy.type==='pdf'&&!copy.sharedLink){copy.data=await blobDataUrl(await pdfBlob(original));copy.hasPdfBody=true;}
         copies.push(copy);
       }
     }
@@ -285,15 +517,7 @@ async function transferFiles(ids,destination,mode) {
   }finally{transferBusy=false;if(fileRenderPending)render();}
 }
 function bindFolderDrop(element,destination) {
-  element.ondragover=event=>{if(!draggingFiles||draggingFiles.owner!==user?.id)return;event.preventDefault();event.stopPropagation();event.dataTransfer.dropEffect=event.ctrlKey||event.altKey?'copy':'move';element.classList.add('file-drop-target');};
-  element.ondragleave=event=>{if(!element.contains(event.relatedTarget))element.classList.remove('file-drop-target');};
-  element.ondrop=async event=>{
-    if(!draggingFiles||draggingFiles.owner!==user?.id)return;
-    event.preventDefault();event.stopPropagation();element.classList.remove('file-drop-target');
-    const ids=draggingFiles.ids;
-    setTimeout(finishFileDrag, 0);
-    try{await transferFiles(ids,destination,event.ctrlKey||event.altKey?'copy':'move');}catch(error){notice(error.message);}
-  };
+  element.dataset.fileDrop=destination||'';
 }
 function searchFiles() {
   flush();
@@ -368,6 +592,24 @@ function blobDataUrl(blob) {
     reader.onerror = () => reject(reader.error || Error("PDF를 읽을 수 없습니다."));
     reader.readAsDataURL(blob);
   });
+}
+let preparingPdfText = false;
+async function preparePdfText() {
+  const file = current(), account = user;
+  if (preparingPdfText || !account?.cloud || !files.some(item => item.id === file?.id) || file?.type !== 'pdf' || sharedSession) return;
+  preparingPdfText = true;
+  notice('이 기기에서 PDF 텍스트를 추출합니다.');
+  try {
+    const blob = await pdfBlob(file);
+    const digest = Array.from(new Uint8Array(await crypto.subtle.digest('SHA-256', await blob.arrayBuffer())), byte => byte.toString(16).padStart(2,'0')).join('');
+    const cached = await cloud.loadPdfText(account.id, file.id);
+    if (cached?.version === 1 && cached.digest === digest) { notice('이미 AI 읽기 준비가 완료된 PDF입니다.'); return; }
+    const extracted = await window.extractPdfText(blob);
+    if (user !== account || !files.some(item => item.id === file.id && !item.deleted)) return;
+    await cloud.savePdfText(account.id, file.id, {...extracted,digest});
+    notice(extracted.truncated ? `앞 ${extracted.processedPages}페이지만 준비했습니다. 추출 한도에 도달했습니다.` : extracted.emptyPages.length ? '읽기 준비 완료. 텍스트가 없는 페이지는 OCR이 필요할 수 있습니다.' : 'AI 읽기 준비 완료. MCP에서 PDF 내용을 읽을 수 있습니다.');
+  } catch(error) { notice(`PDF 읽기 준비 실패: ${error.message}`); }
+  finally { preparingPdfText = false; }
 }
 async function ensurePdfLoaded(file) {
   if (!file || file.type !== "pdf" || file.data || pdfUrls.has(file.id) || pdfLoads.has(file.id)) return;
@@ -545,6 +787,7 @@ function cache() {
   localStorage.setItem("files:" + user.id, JSON.stringify(cached));
 }
 function normalizeFile(file) {
+  if (file.sharedLink) return file;
   if (file.type === "words") file.words ||= [];
   if (file.type === "plan") file.tasks ||= [];
   if (file.type === "calendar") file.events ||= [];
@@ -634,7 +877,7 @@ async function nav(t) {
   if (sharedSession) { parkedShare=sharedSession;sharedSession=null; }
   tab = t;
   opened = openedTabs[t] || null;
-  if ((parkedShare?.file.type === 'folder' ? 'workspace' : parkedShare?.file.type) === t && parkedShare.file.id === opened) { sharedSession=parkedShare;parkedShare=null; }
+  if ((parkedShare?.file.type === 'folder' ? 'shared' : parkedShare?.file.type) === t && parkedShare.file.id === opened) { sharedSession=parkedShare;parkedShare=null; }
   folder = null;
   query = "";
   wordIndex = 0;
@@ -646,13 +889,17 @@ function render() {
   if (user && draggingFiles) { fileRenderPending = true; return; }
   fileRenderPending = false;
   window.richNotes?.destroy();
+  wordListResizeObserver?.disconnect();
   if (!user) return authScreen();
   const navButton = (t) =>
     btn(labels[t], `tab:${t}`, icons[t], tab === t ? "active" : "");
   $("#app").innerHTML =
-    `<div class="shell"><aside class="sidebar ${collapsed ? "collapsed" : ""}"><div class="brand"><span class="mark">W</span><strong>Workspace</strong>${btn("", "collapse", "panel-left-close")}</div><nav class="nav">${["clock", "idea", "note", "study", "plan", "pdf", "words", "calendar"].map(navButton).join("")}<label>자료 관리</label>${["workspace", "favorites", "recent", "trash"].map(navButton).join("")}<label>시스템</label>${btn("새 창", "new-window", "panels-top-left")}${btn("비밀번호 변경", "password", "key-round")}${navButton("settings")}</nav><div class="account">${btn("계정", "account", "user-round")}${btn("로그아웃", "logout", "log-out")}</div></aside><main class="main"><header class="top"><div><h1>${esc(labels[tab])}</h1><div class="status">${esc(sync)}</div></div><div class="actions">${headerActions()}</div></header><section class="content">${content()}</section></main></div>`;
+    `<div class="shell"><aside class="sidebar ${collapsed ? "collapsed" : ""}"><div class="brand"><span class="mark">W</span><strong>Workspace</strong>${btn("", "collapse", "panel-left-close")}</div><nav class="nav">${["clock", "idea", "note", "study", "plan", "pdf", "words", "calendar"].map(navButton).join("")}<label>자료 관리</label>${["workspace", "shared", "favorites", "recent", "trash"].map(navButton).join("")}<label>시스템</label>${btn("새 창", "new-window", "panels-top-left")}${btn("비밀번호 변경", "password", "key-round")}${navButton("settings")}</nav><div class="account">${btn("계정", "account", "user-round")}${btn("로그아웃", "logout", "log-out")}</div></aside><main class="main"><header class="top"><div><h1>${esc(labels[tab])}</h1><div class="status">${esc(sync)}</div></div><div class="actions">${headerActions()}</div></header><section class="content">${content()}</section></main></div>`;
   const titleGroup = $('.top > div');
   titleGroup.classList.add('header-title');
+  document.body.classList.remove('mobile-nav-open');
+  titleGroup.insertAdjacentHTML('afterbegin', `<button type="button" class="mobile-menu" aria-label="메뉴 열기" aria-expanded="false">${icon('menu')}</button>`);
+  $('.shell').insertAdjacentHTML('beforeend', '<button type="button" class="mobile-shade" aria-label="메뉴 닫기" tabindex="-1"></button>');
   titleGroup.insertAdjacentHTML('afterbegin', '<button type="button" class="icon-action header-fullscreen" data-action="fullscreen"></button>');
   updateFullscreenButton();
   refreshIcons();
@@ -676,11 +923,12 @@ function headerActions() {
   return (sharedSession && sharedFolderTrail.length ? btn('공유 폴더로','shared-parent','folder-up') : '') + `<button type="button" class="icon-action ${file?.star ? 'yellow' : ''}" data-action="favorite" title="즐겨찾기" aria-label="즐겨찾기" aria-pressed="${Boolean(file?.star)}" ${enabled ? '' : 'disabled'}>${icon('star')}</button>` + headerControls();
 }
 function headerControls() {
-  if (sharedSession?.file.type === 'folder' && sharedSession.file.id === opened) return btn('내 작업공간','shared-exit','folder') + (sharedSession.owner === user.id ? btn('공유','share','share-2') : '');
+  if (sharedSession?.file.type === 'folder' && sharedSession.file.id === opened) return btn('공유폴더 목록','shared-exit','folder-symlink') + (sharedSession.owner === user.id ? btn('공유','share','share-2') : '');
   const searchButton = btn("", "search-files", "search", "icon-action");
   if (["clock", "study"].includes(tab))
     return `<button class="icon-action" data-action="clock-mute" title="${clockMuted?'소리 켜기':'음소거'}" aria-label="${clockMuted?'소리 켜기':'음소거'}" aria-pressed="${clockMuted}">${icon(clockMuted?'volume-x':'volume-2')}</button><button class="icon-action" data-action="mini-clock" title="작은 시계" aria-label="작은 시계">${icon('picture-in-picture-2')}</button>`;
   if (tab === "settings") return "";
+  if (tab === 'shared') return `<input id="search" aria-label="공유폴더 검색" placeholder="공유폴더 검색" value="${esc(query)}">`+btn('링크로 불러오기','shared-import','link','primary');
   if (featureTypes.includes(tab) || tab === "pdf") {
     const editing = Boolean(opened || drafts[tab]);
     return searchButton + btn("작업공간", "tab:workspace", "folder") +
@@ -775,7 +1023,7 @@ function featureContent() {
     if (f.type === "calendar") return calendarView(f);
     if (f.type === "pdf") {
       const source = f.data || pdfUrls.get(f.id);
-      return `<h2>${esc(f.name)}</h2>${source ? `<embed class="file-preview" type="application/pdf" src="${esc(source)}">` : `<div class="empty"><div class="spinner" aria-hidden="true"></div><h2>PDF 불러오는 중</h2></div>`}`;
+      return `<h2>${esc(f.name)}</h2>${user?.cloud && !sharedSession && files.some(item => item.id === f.id) ? btn('AI 읽기 준비', 'pdf-text', 'scan-text') : ''}${source ? `<embed class="file-preview" type="application/pdf" src="${esc(source)}">` : `<div class="empty"><div class="spinner" aria-hidden="true"></div><h2>PDF 불러오는 중</h2></div>`}`;
     }
     return `<div class="editor"><div class="toolbar">${btn("", "bold", "bold")}${btn("", "italic", "italic")}${btn("", "checklist", "list-checks")}${btn("", "favorite", "star", f.star ? "yellow" : "")}</div><input class="title-input" id="edit-title" aria-label="제목" maxlength="200" value="${esc(f.name)}"><textarea id="edit-body" aria-label="내용" placeholder="내용을 입력하세요">${esc(f.body)}</textarea><small>마지막 수정 ${new Date(f.modified).toLocaleString("ko-KR")}</small></div>`;
   }
@@ -784,6 +1032,7 @@ function featureContent() {
 function listView() {
   let rows = files.filter((f) => (tab === "trash" ? f.deleted : !f.deleted));
   if (tab === "favorites") rows = rows.filter((f) => f.star);
+  else if (tab === 'shared') rows = rows.filter(f => f.sharedLink);
   else if (tab === "recent")
     rows = rows
       .filter((f) => f.lastOpened)
@@ -808,6 +1057,12 @@ function listView() {
 }
 function bindContent() {
   richDirty = false;
+  if (tab==='shared' && !sharedSession) {
+    $('.crumbs').innerHTML=btn('공유폴더','tab:shared','folder-symlink');
+    $('.empty button')?.remove();
+    if(!query && $('.empty h2')) $('.empty h2').textContent='저장한 공유 폴더나 문서가 없습니다';
+    if(!query)$('.empty')?.insertAdjacentHTML('beforeend',btn('링크로 불러오기','shared-import','link'));
+  }
   if (current()?.type === 'note') window.richNotes?.mount(current(), !sharedSession || sharedSession.owner === user.id || sharedSession.role === 'editor', () => {
     richDirty = true;
     if (sharedSession) { shareDirty = true; return; }
@@ -848,6 +1103,7 @@ function bindContent() {
     badge.setAttribute('aria-label', badge.title);
     badge.innerHTML = icon(symbol);
     row.firstElementChild.replaceWith(badge);
+    if(file.sharedLink)row.closest('tr').children[1].textContent=(labels[type]||'폴더')+' · 공유문서';
   });
   document.querySelectorAll('.recent-card').forEach(card => {
     const trigger = card.querySelector('.card-open');
@@ -948,6 +1204,7 @@ async function openFile(id) {
   flush();
   const f = files.find((f) => f.id === id);
   if (!f || f.deleted) return;
+  if (f.sharedLink) { history.replaceState(null,'','#share='+encodeURIComponent(f.sharedLink));openSharedLink(false,true);return; }
   if (f.type === "folder") {
     selectedFileIds.clear();selectedFileId=null;
     folder = f.id;
@@ -969,13 +1226,21 @@ function menuFile(id) {
   if(!selectedFileIds.has(id))selectFile(id);
   modal.innerHTML = `<h2>${esc(f.name)}</h2><div class="list">${f.deleted ? btn("복원", "restore:" + id, "undo-2") + btn("영구 삭제", "destroy:" + id, "trash-2", "danger") : btn("열기", "open:" + id, "folder-open") + btn("이름 변경", "rename:" + id, "pencil") + btn(f.star ? "즐겨찾기 해제" : "즐겨찾기", "star:" + id, "star") + btn("이동", "move:" + id, "folder-input") + btn("휴지통으로 이동", "delete:" + id, "trash-2")}</div>${btn("닫기", "close")}`;
   modal.showModal();
+  const count=fileActionTargets(id).length;
+  if(count>1)modal.querySelector('h2').textContent=`${count}개 항목 선택됨`;
   if (!f.deleted) modal.querySelector('.list').insertAdjacentHTML('afterbegin', btn('공유', 'share:' + id, 'share-2'));
   if(!f.deleted)modal.querySelector('.list').insertAdjacentHTML('afterbegin',btn('복사','copy:'+id,'copy')+btn('잘라내기','file-cut:'+id,'scissors')+(f.type==='folder'?btn('폴더에 붙여넣기','file-paste:'+id,'clipboard-paste'):''));
+  if(count>1){
+    modal.querySelectorAll('[data-action^="open:"],[data-action^="share:"],[data-action^="file-paste:"]').forEach(button=>button.remove());
+    const star=modal.querySelector('[data-action^="star:"]');
+    if(star)star.querySelector('span').textContent=fileActionTargets(id).every(file=>file.star)?'즐겨찾기 해제':'즐겨찾기';
+  }
   refreshIcons();
 }
 function moveDialog(id) {
-  const f = files.find((f) => f.id === id);
-  const descendants = new Set([id]);
+  const targets = fileActionTargets(id).filter(file=>!file.deleted);
+  const owner=user.id;
+  const descendants = new Set(targets.map(file=>file.id));
   let changed = true;
   while (changed) {
     changed = false;
@@ -987,17 +1252,16 @@ function moveDialog(id) {
     });
   }
   showModal(
-    "저장 위치",
+    `${targets.length}개 항목 이동`,
     `<select name="parent"><option value="">내 작업공간</option>${files
       .filter(
         (x) => x.type === "folder" && !x.deleted && !descendants.has(x.id),
       )
       .map((x) => `<option value="${x.id}">${esc(x.name)}</option>`)
       .join("")}</select>`,
-    (d) => {
-      f.parent = d.get("parent") || null;
-      persist(f);
-      render();
+    async (d) => {
+      if(user?.id!==owner)throw Error('계정이 변경되었습니다.');
+      await transferFiles(targets.map(file=>file.id),d.get('parent')||null,'move');
     },
   );
 }
@@ -1115,7 +1379,15 @@ setInterval(() => {
   updateMiniClock();
 }, 250);
 const wordListPositions = new Map();
+let wordListResizeObserver;
+function centerWordInList(list) {
+  const selected = list.querySelector('.primary');
+  if (!selected || !list.isConnected) return;
+  const row = selected.getBoundingClientRect(), viewport = list.getBoundingClientRect();
+  list.scrollTop += row.top + row.height / 2 - (viewport.top + list.clientTop + list.clientHeight / 2);
+}
 function mountWordPanels() {
+  wordListResizeObserver?.disconnect();
   const content = $('.content');
   $('.main').classList.add('words-panel-layout');
   const tools = document.createElement('section');
@@ -1141,11 +1413,18 @@ function mountWordPanels() {
   const previous = wordListPositions.get(key);
   list.scrollTop = previous?.top || 0;
   if (!previous || previous.index !== wordIndex) {
-    const selected = list.querySelector('.primary');
-    if (selected) list.scrollTop = Math.max(0, selected.offsetTop - list.offsetTop - list.clientHeight / 2 + selected.clientHeight / 2);
+    centerWordInList(list);
+    requestAnimationFrame(() => centerWordInList(list));
   }
   wordListPositions.set(key, {top:list.scrollTop,index:wordIndex});
   list.addEventListener('scroll', () => wordListPositions.set(key, {top:list.scrollTop,index:wordIndex}));
+  let width=list.clientWidth,height=list.clientHeight;
+  wordListResizeObserver = new ResizeObserver(() => {
+    if (width===list.clientWidth && height===list.clientHeight) return;
+    width=list.clientWidth;height=list.clientHeight;
+    centerWordInList(list);
+  });
+  wordListResizeObserver.observe(list);
 }
 function quizKey(f) {
   return JSON.stringify([user.id, sharedSession?.owner || user.id, f.id]);
@@ -1333,6 +1612,9 @@ document.addEventListener("click", async (e) => {
         else await cloud.revoke(sharingTarget.shareId);
         notice('공유를 해제했습니다.');
         break;
+      case 'shared-import':
+        importShareDialog();
+        break;
       case 'shared-copy':
         await navigator.clipboard.writeText('https://workspace-app-jeh.pages.dev/#share=' + id);
         notice('공유 링크를 복사했습니다.');
@@ -1351,9 +1633,9 @@ document.addEventListener("click", async (e) => {
       }
       case 'shared-exit':
         stopShared?.(); sharedSession = null; parkedShare = null; opened = null;
-        delete openedTabs.workspace;
+        delete openedTabs.shared;
         history.replaceState(null, '', location.pathname + location.search);
-        await nav('workspace');
+        await nav('shared');
         break;
       case "search-files":
         searchFiles();
@@ -1418,6 +1700,9 @@ document.addEventListener("click", async (e) => {
       case "pdf-open":
         importPdf();
         break;
+      case "pdf-text":
+        await preparePdfText();
+        break;
       case "new":
         createDialog(
           ["note", "idea", "words", "plan", "calendar", "pdf"].includes(tab)
@@ -1429,6 +1714,7 @@ document.addEventListener("click", async (e) => {
         openFile(id);
         break;
       case "card-menu":
+        if (!selectedFileIds.has(id)) selectFile(id);
         cardMenu = cardMenu === id ? null : id;
         render();
         break;
@@ -1514,14 +1800,16 @@ document.addEventListener("click", async (e) => {
         moveDialog(id || f?.id);
         break;
       case "rename": {
-        const x = files.find((x) => x.id === id);
+        const targets = fileActionTargets(id),owner=user.id;
+        if(!targets.length)break;
         showModal(
-          "이름 변경",
-          `<input name="name" required maxlength="200" value="${esc(x.name)}">`,
-          (d) => {
-            x.name = d.get("name").trim();
-            persist(x);
-            render();
+          targets.length>1 ? `${targets.length}개 이름 변경 (이름 뒤에 번호 추가)` : '이름 변경',
+          `<input name="name" required maxlength="${targets.length>1?180:200}" value="${targets.length>1?'':esc(targets[0].name)}">`,
+          async (d) => {
+            if(user?.id!==owner)throw Error('계정이 변경되었습니다.');
+            const name=String(d.get('name')).trim();
+            if(!name)throw Error('이름을 입력해주세요.');
+            await changeFiles(targets.map((file,index)=>({id:file.id,fields:{name:targets.length>1?`${name} (${index+1})`:name,modified:Date.now()}})));
           },
         );
         break;
@@ -1531,6 +1819,12 @@ document.addEventListener("click", async (e) => {
         flush();
         const x = id ? files.find((x) => x.id === id) : f;
         if (!x || (sharedSession && sharedSession.owner !== user.id)) break;
+        if(id){
+          const targets=fileActionTargets(id).filter(file=>!file.deleted);
+          const star=!targets.every(file=>file.star);
+          await changeFiles(targets.map(file=>({id:file.id,fields:{star,modified:Date.now()}})));
+          break;
+        }
         x.star = !x.star;
         persist(x);
         render();
@@ -1538,35 +1832,28 @@ document.addEventListener("click", async (e) => {
       }
       case "delete":
       case "restore": {
-        const x = files.find((x) => x.id === id);
-        const affected = new Set([id]);
-        let growth=true;
-        while(growth){growth=false;files.forEach(f=>{if(affected.has(f.parent)&&!affected.has(f.id)){affected.add(f.id);growth=true;}});}
-        for(const child of files.filter(f=>affected.has(f.id))){
-          if(a==='delete'&&!child.deleted){child.deleted=true;child.trashGroup=id;await persist(child);}
-          else if(a==='restore'&&(child.id===id||child.trashGroup===id)){child.deleted=false;delete child.trashGroup;await persist(child);}
-        }
-        if (!x.deleted && files.find((z) => z.id === x.parent)?.deleted)
-          x.parent = null;
-        persist(x);
-        render();
+        const targets=fileActionTargets(id).filter(file=>Boolean(file.deleted)===(a==='restore'));
+        await changeFiles(trashChanges(targets,a==='restore'));
+        notice(`${targets.length}개 항목을 ${a==='restore'?'복원했습니다.':'휴지통으로 이동했습니다.'}`);
         break;
       }
-      case "destroy":
+      case "destroy": {
+        const targets=fileActionTargets(id).filter(file=>file.deleted),owner=user.id;
+        const ids=new Set(targets.map(file=>file.id));
+        let growth=true;
+        while(growth){growth=false;for(const file of files)if(file.deleted&&ids.has(file.parent)&&!ids.has(file.id)){ids.add(file.id);growth=true;}}
         showModal(
           "영구 삭제",
-          "<p>이 항목은 복구할 수 없습니다.</p>",
+          `<p>선택한 ${targets.length}개 항목과 포함된 삭제 항목, 총 ${ids.size}개를 영구 삭제합니다. 복구할 수 없습니다.</p>`,
           async () => {
-            for(const child of files.filter(x=>x.parent===id)){child.parent=null;await persist(child);}
-            if (user.cloud) await cloud.remove(user.id, id);
-            if (pdfUrls.has(id)) URL.revokeObjectURL(pdfUrls.get(id));
-            pdfUrls.delete(id);pdfBlobs.delete(id);pdfLoads.delete(id);
-            files = files.filter((x) => x.id !== id);
-            cache();
-            render();
+            if(user?.id!==owner)throw Error('계정이 변경되었습니다.');
+            const changes=files.filter(file=>!ids.has(file.id)&&ids.has(file.parent)).map(file=>({id:file.id,fields:{parent:null,modified:Date.now()}}));
+            await changeFiles(changes,[...ids]);
+            notice(`${ids.size}개 항목을 영구 삭제했습니다.`);
           },
         );
         break;
+      }
       case "logout":
         fileClipboard=null;draggingFiles=null;selectedFileIds.clear();selectedFileId=null;
         stopShared?.();sharedSession=null;
@@ -1581,9 +1868,15 @@ document.addEventListener("click", async (e) => {
       case "account":
         showModal(
           "계정",
-          `<p>${esc(user.email)}</p><p>${user.cloud ? "Firebase 동기화 계정" : "로컬 계정"}</p>${btn("라이트 / 다크", "theme", "sun-moon")}${btn("비밀번호 변경", "password", "key-round")}${!window.desktop ? `<hr>${btn('데스크톱 앱 설치','desktop-install','download')}` : ''}`,
+          `<p>${esc(user.email)}</p><p>${user.cloud ? "Firebase 동기화 계정" : "로컬 계정"}</p>${btn("라이트 / 다크", "theme", "sun-moon")}${btn("비밀번호 변경", "password", "key-round")}${!window.desktop ? `<hr>${btn('홈 화면에 앱 설치','pwa-install','smartphone')}${btn('ChatGPT 연결','mcp-connect','plug')}${btn('데스크톱 앱 설치','desktop-install','download')}` : ''}`,
           () => {},
         );
+        break;
+      case 'mcp-connect':
+        window.open('https://workspace-app-jeh.pages.dev/mcp-connect.html','_blank','noopener,noreferrer');
+        break;
+      case 'pwa-install':
+        await window.installWorkspace?.();
         break;
       case 'desktop-install': {
         if (window.desktop) break;
@@ -1646,7 +1939,7 @@ document.addEventListener("click", async (e) => {
       case "export":
         flush();
         const backupFiles = await Promise.all(files.map(async file => {
-          if (!user.cloud || file.type !== "pdf" || file.data) return file;
+          if (!user.cloud || file.type !== "pdf" || file.data || file.sharedLink) return file;
           return { ...file, data: await cloud.loadPdf(user.id, file.id) };
         }));
         const backup = JSON.stringify({ version: 1, files: backupFiles }, null, 2);
@@ -1826,11 +2119,15 @@ window.prepareWorkspaceUpdate = async () => {
   shareDirty = false;
 };
 document.addEventListener("keydown", e => {
-  const editing=e.target.closest?.('input,textarea,select,[contenteditable="true"],[role="textbox"]');
-  const fileScreen=tab!=='trash'&&!sharedSession&&(document.querySelector('[data-file-select]') || (tab==='workspace'&&!opened));
+  const editing=e.target.closest?.('input:not(.file-select-toggle),textarea,select,[contenteditable="true"],[role="textbox"]');
+  const fileScreen=!sharedSession&&(document.querySelector('[data-file-select]') || (tab==='workspace'&&!opened));
   if(user&&!modal.open&&!editing&&fileScreen&&!e.isComposing&&!e.repeat){
     const mac=/Mac|iPhone|iPad/.test(navigator.platform), modifier=mac?e.metaKey:e.ctrlKey,key=e.key.toLowerCase();
-    if(modifier&&['c','x','v','a'].includes(key)){
+    if(e.key==='Delete' || (mac&&e.metaKey&&e.key==='Backspace')){
+      const first=[...selectedFileIds].find(id=>document.querySelector(`[data-file-select="${CSS.escape(id)}"]`));
+      if(first){e.preventDefault();const button=document.createElement('button');button.dataset.action=(tab==='trash'?'destroy:':'delete:')+first;document.body.append(button);button.click();button.remove();}return;
+    }
+    if(modifier&&(tab==='trash'?['a']:['c','x','v','a']).includes(key)){
       e.preventDefault();
       if(key==='c'||key==='x')clipboardFiles(key==='c'?'copy':'move');
       if(key==='a'){document.querySelectorAll('[data-file-select]').forEach(node=>selectedFileIds.add(node.dataset.fileSelect));paintFileSelection();}
