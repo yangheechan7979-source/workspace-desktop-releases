@@ -1467,7 +1467,17 @@ function localDate() {
   return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}-${String(d.getDate()).padStart(2, "0")}`;
 }
 function settingsView() {
-  return `<div class="settings"><h2>계정과 저장</h2><p>${esc(user.email)}</p><p>Firebase 클라우드 동기화 계정</p><h2>백업</h2>${btn("전체 백업 내보내기", "export", "download")}<p><label>백업 가져오기 <input type="file" id="backup-import" accept=".json"></label></p><h2>화면</h2>${btn("라이트 / 다크 전환", "theme", "sun-moon")}<h2>데이터</h2><p>저장된 항목 ${files.length}개</p></div>`;
+  return `<div class="settings"><h2>계정과 저장</h2><p>${esc(user.email)}</p><p>${user.cloud?'Firebase 클라우드 동기화 계정':'로컬 계정'}</p>${storageDetails()}<h2>백업</h2>${btn("전체 백업 내보내기", "export", "download")}<p><label>백업 가져오기 <input type="file" id="backup-import" accept=".json"></label></p><h2>화면</h2>${btn("라이트 / 다크 전환", "theme", "sun-moon")}<h2>데이터</h2><p>저장된 항목 ${files.length}개</p></div>`;
+}
+function storageGauge(usage=storageQuota.summarize(files)) {
+  const confirmed=window.serverStorageUsage;
+  if(confirmed?.limitBytes===storageQuota.LIMIT_BYTES)usage={...usage,...confirmed,percent:Math.min(100,confirmed.usedBytes/confirmed.limitBytes*100)};
+  const level=usage.percent>=100?'full':usage.percent>=80?'warning':'normal';
+  return `<div class="storage-usage ${level}"><div class="storage-heading"><span>저장공간</span><strong>${storageQuota.formatMB(usage.usedBytes)}MB / 30MB</strong></div><progress max="${usage.limitBytes}" value="${Math.min(usage.usedBytes,usage.limitBytes)}" aria-label="저장공간 사용량"></progress><small>${confirmed?'서버에서 확인한 사용량':'추정 사용량 · 서버 확인 중'}</small></div>`;
+}
+function storageDetails() {
+  const usage=storageQuota.summarize(files),mb=storageQuota.formatMB;
+  return `<section class="storage-details"><h2>저장공간 상세</h2>${storageGauge(usage)}<dl><div><dt>남은 용량</dt><dd>${mb(usage.remainingBytes)}MB</dd></div><div><dt>PDF 원본</dt><dd>${mb(usage.pdfBytes)}MB</dd></div><div><dt>문서 및 파일 정보</dt><dd>${mb(usage.documentBytes)}MB</dd></div><div><dt>휴지통 (사용량에 포함)</dt><dd>${mb(usage.trashBytes)}MB</dd></div><div><dt>공유문서 바로가기</dt><dd>${usage.sharedCount}개</dd></div></dl><p class="muted">PDF 원본 크기 기준입니다. 공유문서는 원본 용량을 중복 계산하지 않으며, 개인용 사본과 휴지통 파일은 포함합니다. 서버 집계 전에는 PDF 추출 텍스트 등 일부 데이터가 빠질 수 있습니다.</p>${usage.unknownPdfCount?`<p class="danger">원본 크기를 확인해야 하는 PDF ${usage.unknownPdfCount}개</p>`:''}<table class="storage-type-table"><thead><tr><th>종류</th><th>항목 수</th><th>사용량</th></tr></thead><tbody>${Object.entries(usage.byType).map(([type,value])=>`<tr><td>${esc(type==='shared'?'공유문서':labels[type]||'폴더')}</td><td>${value.count}</td><td>${mb(value.bytes)}MB</td></tr>`).join('')}</tbody></table>${btn('휴지통 열기','tab:trash','trash-2')}</section>`;
 }
 function firebaseDialog() {
   showModal(
@@ -1609,7 +1619,7 @@ document.addEventListener("click", async (e) => {
       case 'share-revoke':
         if (!sharingTarget) break;
         if (sharingTarget.type === 'folder') await cloud.revokeFolder(user.id, sharingTarget.id);
-        else await cloud.revoke(sharingTarget.shareId);
+        else await cloud.revoke(user.id, sharingTarget.shareId);
         notice('공유를 해제했습니다.');
         break;
       case 'shared-import':
@@ -1868,7 +1878,7 @@ document.addEventListener("click", async (e) => {
       case "account":
         showModal(
           "계정",
-          `<p>${esc(user.email)}</p><p>${user.cloud ? "Firebase 동기화 계정" : "로컬 계정"}</p>${btn("라이트 / 다크", "theme", "sun-moon")}${btn("비밀번호 변경", "password", "key-round")}${!window.desktop ? `<hr>${btn('홈 화면에 앱 설치','pwa-install','smartphone')}${btn('ChatGPT 연결','mcp-connect','plug')}${btn('데스크톱 앱 설치','desktop-install','download')}` : ''}`,
+          `<p>${esc(user.email)}</p><p>${user.cloud ? "Firebase 동기화 계정" : "로컬 계정"}</p>${storageGauge()}${btn('저장공간 상세','tab:settings','database')}${btn("라이트 / 다크", "theme", "sun-moon")}${btn("비밀번호 변경", "password", "key-round")}${!window.desktop ? `<hr>${btn('홈 화면에 앱 설치','pwa-install','smartphone')}${btn('ChatGPT 연결','mcp-connect','plug')}${btn('데스크톱 앱 설치','desktop-install','download')}` : ''}`,
           () => {},
         );
         break;
@@ -2179,7 +2189,10 @@ if (cloudConfigured && cloud.ready) {
         return;
       }
     }
-    if (account && user?.id !== account.uid) await enter({id:account.uid,email:account.email || 'Google 계정',cloud:true});
+    if (account && user?.id !== account.uid) {
+      await enter({id:account.uid,email:account.email || 'Google 계정',cloud:true});
+      cloud.quota().then(()=>render()).catch(()=>{});
+    }
     else if (!account) {
       if (user?.cloud) { cloud.unwatch();stopShared?.();sharedSession=null; }
       authScreen();

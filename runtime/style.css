@@ -474,6 +474,22 @@ dialog select {
 dialog .actions {
   justify-content: flex-end;
 }
+.storage-usage { margin:16px 0;min-width:0; }
+.storage-heading { display:flex;justify-content:space-between;gap:8px;flex-wrap:wrap;font-size:13px; }
+.storage-usage progress { display:block;appearance:none;width:100%;height:8px;margin:10px 0;border:0;overflow:hidden;border-radius:4px;background:var(--line); }
+.storage-usage progress::-webkit-progress-bar { background:var(--line); }
+.storage-usage progress::-webkit-progress-value { background:#27bba0; }
+.storage-usage progress::-moz-progress-bar { background:#27bba0; }
+.storage-usage.warning progress::-webkit-progress-value { background:#d49b24; }
+.storage-usage.full progress::-webkit-progress-value { background:#e35463; }
+.storage-usage small { color:var(--muted);font-size:12px; }
+.storage-details { max-width:680px;padding:16px 0;border-block:1px solid var(--line);margin:20px 0; }
+.storage-details dl > div { display:flex;justify-content:space-between;gap:16px;padding:8px 0; }
+.storage-details dd { margin:0;white-space:nowrap; }
+.storage-details p { line-height:1.6; }
+.storage-type-table { width:100%;border-collapse:collapse;margin:20px 0; }
+.storage-type-table th,.storage-type-table td { padding:10px 0;border-bottom:1px solid var(--line);text-align:left; }
+.storage-type-table th:last-child,.storage-type-table td:last-child { text-align:right; }
 dialog.share-intake {
   box-sizing: border-box;
   width: min(640px, calc(100vw - 24px));
