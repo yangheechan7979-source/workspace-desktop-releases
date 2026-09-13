@@ -1,4 +1,4 @@
-const { app, BrowserWindow, ipcMain, dialog } = require("electron");
+const { app, BrowserWindow, ipcMain, dialog, shell } = require("electron");
 const path = require("path");
 const http = require("http");
 const fs = require("fs");
@@ -134,6 +134,11 @@ ipcMain.handle('quit-for-update', async event => {
     }
   }
   setTimeout(() => app.quit(), 100);
+  return true;
+});
+ipcMain.handle('open-download', async event => {
+  if (!event.sender.getURL().startsWith(appUrl)) throw Error('잘못된 다운로드 요청입니다.');
+  await shell.openExternal('https://workspace-app-jeh.pages.dev/');
   return true;
 });
 ipcMain.handle("export", async (_, data) => {

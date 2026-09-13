@@ -12,8 +12,9 @@
       const response = await fetch(endpoint, {cache:'no-store'});
       if (!response.ok) return;
       const release = await response.json();
-      if (!Number.isSafeInteger(release.version) || release.version <= Number(currentVersion)) return;
-      if (localStorage.getItem(dismissedKey) === String(release.version)) return;
+      release.incompatible = desktop && Number.isSafeInteger(release.minimumDesktopVersion) && Number(currentVersion) < release.minimumDesktopVersion;
+      if (!Number.isSafeInteger(release.version) || (!release.incompatible && release.version <= Number(currentVersion))) return;
+      if (!release.incompatible && localStorage.getItem(dismissedKey) === String(release.version)) return;
       pending = release;
       show();
     } catch { /* An offline check can wait until the next interval. */ }
@@ -23,6 +24,26 @@
     if (!pending || document.querySelector('dialog[open]')) return;
     const dialog = document.createElement('dialog');
     dialog.id = 'update-dialog';
+    if (pending.incompatible) {
+      dialog.innerHTML = '<h2>이 버전은 더 이상 호환되지 않습니다</h2><p>웹에서 최신 Workspace 데스크톱 앱을 다시 다운로드해 주세요.</p><p id="update-error" role="status"></p><div class="actions"><button type="button" id="update-exit">종료</button><button type="button" id="update-download" class="primary">웹에서 다운로드</button></div>';
+      document.body.appendChild(dialog);
+      const closeIncompatible = async download => {
+        dialog.querySelectorAll('button').forEach(button => button.disabled=true);
+        try {
+          await window.prepareWorkspaceUpdate();
+          if (download) await window.desktop.openDownload();
+          await window.desktop.quitForUpdate();
+        } catch (error) {
+          dialog.querySelector('#update-error').textContent = error.message;
+          dialog.querySelectorAll('button').forEach(button => button.disabled=false);
+        }
+      };
+      dialog.addEventListener('cancel', event => event.preventDefault());
+      dialog.querySelector('#update-exit').addEventListener('click', () => closeIncompatible(false));
+      dialog.querySelector('#update-download').addEventListener('click', () => closeIncompatible(true));
+      dialog.showModal();
+      return;
+    }
     dialog.innerHTML = `<h2>Workspace 새 버전이 출시되었습니다</h2><p>${desktop ? '새로운 기능과 개선 사항이 추가되었습니다. 새 데스크톱 버전을 설치해주세요.' : '새로운 기능과 개선 사항이 추가되었습니다.'}</p><p id="update-error" role="status"></p><div class="actions"><button type="button" id="update-later">나중에</button>${desktop ? '<button type="button" id="update-close" class="primary">확인</button>' : '<button type="button" id="update-now" class="primary">업데이트</button>'}</div>`;
     document.body.appendChild(dialog);
     const dismiss = () => {
